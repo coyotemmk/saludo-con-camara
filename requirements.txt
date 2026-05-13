@@ -1,3 +1,4 @@
 opencv-python
 mediapipe
 pyttsx3
+piper-tts

@@ -68,7 +68,7 @@ Debe mostrar **Python 3.8 o superior**. Ahora sí puedes continuar con la instal
 ### En Windows
 
 1. **Descarga el proyecto** y abre PowerShell en la carpeta
-2. **Ejecuta el instalador:**
+2. **Ejecuta el instalador (instala Piper TTS automáticamente):**
    ```powershell
    .\setup.bat
    ```
@@ -89,7 +89,7 @@ Debe mostrar **Python 3.8 o superior**. Ahora sí puedes continuar con la instal
    ```bash
    rm -rf venv
    ```
-4. **Ejecuta el instalador:**
+4. **Ejecuta el instalador (instala Piper TTS automáticamente):**
    ```bash
    ./setup.sh
    ```
@@ -114,8 +114,11 @@ venv\Scripts\activate
 # Linux:
 source venv/bin/activate
 
-# Instalar dependencias
+# Instalar dependencias (incluyendo Piper TTS)
 pip install -r requirements.txt
+
+# O instalar paquetes individuales
+pip install opencv-python mediapipe pyttsx3 piper-tts
 
 # Ejecutar
 python app.py

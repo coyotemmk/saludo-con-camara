@@ -63,6 +63,10 @@ echo "📦 Actualizando pip..."
 echo "📦 Instalando OpenCV, MediaPipe, pyttsx3..."
 "$VENV_PYTHON" -m pip install -r requirements.txt --quiet
 
+# Instalar Piper TTS (para voces de alta calidad)
+echo "📦 Instalando Piper TTS para voces de calidad..."
+"$VENV_PYTHON" -m pip install piper-tts --quiet
+
 # Verificar que se instalaron
 echo "✓ Verificando instalaciones..."
 "$VENV_PYTHON" -c "import cv2; import mediapipe; import pyttsx3; print('✅ Todas las dependencias instaladas correctamente')" || {
