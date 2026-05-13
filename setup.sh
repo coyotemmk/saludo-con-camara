@@ -37,26 +37,35 @@ fi
 echo "🔧 Creando entorno virtual..."
 python3 -m venv venv
 
-# Resolver binarios del entorno virtual
-VENV_PYTHON="venv/bin/python"
-VENV_PIP="venv/bin/pip"
+# Resolver binarios del entorno virtual (sin confiar en activate)
+VENV_PYTHON="./venv/bin/python"
+VENV_PIP="./venv/bin/pip"
 
-# Activar entorno virtual si existe
-if [ -f "venv/bin/activate" ]; then
-    echo "✓ Activando entorno virtual..."
-    # shellcheck disable=SC1091
-    . venv/bin/activate
-else
-    echo "⚠️  No se encontró venv/bin/activate, usando binarios directos del venv"
+# Verificar que se creó bien
+if [ ! -f "$VENV_PYTHON" ]; then
+    echo "❌ Error: No se pudo crear el entorno virtual."
+    echo "Intenta: python3 -m venv venv"
+    exit 1
 fi
 
-# Actualizar pip
-echo "📦 Actualizando pip..."
-"$VENV_PYTHON" -m pip install --upgrade pip
+echo "✓ Entorno virtual creado en: $(pwd)/venv"
 
-# Instalar dependencias Python
-echo "📦 Instalando dependencias Python..."
-"$VENV_PYTHON" -m pip install -r requirements.txt
+# Actualizar pip (DENTRO del entorno virtual)
+echo "📦 Actualizando pip..."
+"$VENV_PYTHON" -m pip install --upgrade pip --quiet
+
+# Instalar dependencias Python (DENTRO del entorno virtual)
+echo "📦 Instalando OpenCV, MediaPipe, pyttsx3..."
+"$VENV_PYTHON" -m pip install -r requirements.txt --quiet
+
+# Verificar que se instalaron
+echo "✓ Verificando instalaciones..."
+"$VENV_PYTHON" -c "import cv2; import mediapipe; import pyttsx3; print('✅ Todas las dependencias instaladas correctamente')" || {
+    echo "❌ Error: Las dependencias no se instalaron correctamente"
+    echo "Intenta manualmente:"
+    echo "  $VENV_PYTHON -m pip install -r requirements.txt"
+    exit 1
+}
 
 # Descargar modelo de MediaPipe (Hand Landmarker)
 echo "⏳ Descargando modelo de Hand Landmarker (esto puede tardar)..."

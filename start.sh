@@ -13,7 +13,9 @@ cd "$SCRIPT_DIR" || exit 1
 
 # Elegir intérprete de Python
 PYTHON_BIN=""
-if [ -x "venv/bin/python" ]; then
+if [ -x "./venv/bin/python" ]; then
+    PYTHON_BIN="./venv/bin/python"
+elif [ -x "venv/bin/python" ]; then
     PYTHON_BIN="venv/bin/python"
 elif command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="python3"
