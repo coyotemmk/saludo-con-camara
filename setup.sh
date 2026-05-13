@@ -27,6 +27,7 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
         libgl1 \
         libglib2.0-0 \
         libatlas-base-dev \
+        alsa-utils \
         espeak-ng \
         wget
     

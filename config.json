@@ -1,0 +1,9 @@
+{
+  "tts_backend": "piper",
+  "piper_voice_model": "voice/es_ES-davefx-medium.onnx",
+  "piper_voice_config": "voice/es_ES-davefx-medium.onnx.json",
+  "system_voice_name": "",
+  "system_voice_rate": 150,
+  "system_voice_volume": 0.9,
+  "system_language_hint": "es"
+}

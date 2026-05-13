@@ -1,10 +1,16 @@
 from collections import deque
 import math
+import json
 from pathlib import Path
+import shutil
 import urllib.request
 import threading
 import time
 from queue import Queue
+import subprocess
+import tempfile
+import wave
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -12,6 +18,33 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import pyttsx3
+import platform
+
+
+CONFIG_FILE = Path("config.json")
+
+DEFAULT_CONFIG = {
+    "tts_backend": "auto",
+    "piper_voice_model": "voice/bmo.onnx",
+    "piper_voice_config": "voice/bmo.onnx.json",
+    "system_voice_name": "",
+    "system_voice_rate": 150,
+    "system_voice_volume": 0.9,
+    "system_language_hint": "es",
+}
+
+
+def load_config() -> dict:
+    config = DEFAULT_CONFIG.copy()
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as config_file:
+                user_config = json.load(config_file)
+            if isinstance(user_config, dict):
+                config.update(user_config)
+        except Exception as exc:
+            print(f"Config: no se pudo leer {CONFIG_FILE}: {exc}")
+    return config
 
 
 class GreetingDetector:
@@ -132,29 +165,129 @@ def ensure_model_file() -> Path:
     return model_path
 
 
+def find_piper_voice_model(config: dict) -> tuple[Optional[Path], Optional[Path]]:
+    """Find piper voice model files, checking multiple locations."""
+    model_path = Path(str(config.get("piper_voice_model", "voice/bmo.onnx")))
+    config_path = Path(str(config.get("piper_voice_config", "voice/bmo.onnx.json")))
+
+    # Try primary location
+    if model_path.exists() and config_path.exists():
+        print(f"Piper: Modelo encontrado en {model_path}")
+        return model_path, config_path
+    
+    # Try alternative paths
+    alternatives = [
+        (Path("./voice/bmo.onnx"), Path("./voice/bmo.onnx.json")),
+        (Path("./bmo.onnx"), Path("./bmo.onnx.json")),
+    ]
+    
+    for alt_model, alt_config in alternatives:
+        if alt_model.exists() and alt_config.exists():
+            print(f"Piper: Modelo encontrado en {alt_model}")
+            return alt_model, alt_config
+    
+    print(f"Piper: No se encontró modelo en {model_path}")
+    return None, None
+
+
 class TTSWorker:
-    def __init__(self) -> None:
+    def __init__(self, config: dict) -> None:
         self.queue: Queue = Queue()
         self.min_interval_seconds = 0.0
         self.last_spoken_at = 0.0
         self._speaking = threading.Event()
         self.engine = None
+        self.piper_voice = None
+        self.config = config
+        self.tts_backend = str(config.get("tts_backend", "auto")).lower()
+        self.piper_model_path, self.piper_config_path = find_piper_voice_model(config)
         self._init_engine()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
+
+    def _check_piper_available(self) -> bool:
+        """Check if piper executable is available."""
+        piper_cmd = "piper.exe" if platform.system() == "Windows" else "piper"
+        return shutil.which(piper_cmd) is not None
 
     def _init_engine(self) -> None:
         """Initialize pyttsx3 engine with Spanish voice if available."""
         try:
             self.engine = pyttsx3.init()
-            self.engine.setProperty('rate', 150)
-            self.engine.setProperty('volume', 0.9)
+            self.engine.setProperty('rate', int(self.config.get("system_voice_rate", 150)))
+            self.engine.setProperty('volume', float(self.config.get("system_voice_volume", 0.9)))
+            self._select_spanish_voice()
             print("TTSWorker: pyttsx3 inicializado")
         except Exception as e:
             print(f"TTSWorker: Error inicializando motor TTS -> {e}")
 
+        use_piper = self.tts_backend in ("auto", "piper")
+        if use_piper and self.piper_model_path is not None:
+            if self._check_piper_available():
+                self.piper_voice = True  # Flag: Piper está disponible
+                print(f"TTSWorker: voz Piper cargada desde {self.piper_model_path}")
+            else:
+                self.piper_voice = None
+                if self.tts_backend == "piper":
+                    print("TTSWorker: no se pudo cargar Piper; usando pyttsx3")
+                else:
+                    print("TTSWorker: Piper no disponible; usando pyttsx3")
+        else:
+            if self.tts_backend == "piper":
+                print("TTSWorker: modelo Piper no configurado; usando pyttsx3")
+
+    def _select_spanish_voice(self) -> None:
+        if not self.engine:
+            return
+
+        try:
+            voices = self.engine.getProperty('voices')
+        except Exception:
+            return
+
+        def voice_matches_spanish(voice) -> bool:
+            voice_id = str(getattr(voice, 'id', '')).lower()
+            voice_name = str(getattr(voice, 'name', '')).lower()
+            languages = getattr(voice, 'languages', []) or []
+
+            language_text = " ".join(
+                str(language, errors='ignore').lower() if isinstance(language, (bytes, bytearray))
+                else str(language).lower()
+                for language in languages
+            )
+
+            return (
+                'spanish' in voice_name
+                or 'spanish' in voice_id
+                or 'es_' in voice_id
+                or 'es-' in voice_id
+                or 'es' in language_text
+                or 'spa' in language_text
+            )
+
+        selected_voice = None
+        voice_name_hint = str(self.config.get("system_voice_name", "")).strip().lower()
+        language_hint = str(self.config.get("system_language_hint", "es")).strip().lower()
+
+        for voice in voices:
+            if voice_matches_spanish(voice):
+                if voice_name_hint:
+                    if voice_name_hint in str(getattr(voice, 'name', '')).lower() or voice_name_hint in str(getattr(voice, 'id', '')).lower():
+                        selected_voice = voice
+                        break
+                else:
+                    selected_voice = voice
+                    break
+
+        if selected_voice is not None:
+            self.engine.setProperty('voice', selected_voice.id)
+            print(f"TTSWorker: voz española seleccionada -> {selected_voice.name}")
+        elif voices:
+            print("TTSWorker: no se encontró voz española, usando la primera voz disponible")
+            self.engine.setProperty('voice', voices[0].id)
+
     def _run(self) -> None:
-        print("TTSWorker: hilo iniciado (pyttsx3)")
+        print("TTSWorker: hilo iniciado")
         while True:
             text = self.queue.get()
             print(f"TTSWorker: procesando -> {text}")
@@ -164,15 +297,25 @@ class TTSWorker:
                 if wait_seconds > 0:
                     time.sleep(wait_seconds)
 
-                self._speaking.set()
-                if self.engine:
+                if self.piper_voice:
+                    try:
+                        self._speak_with_piper(text)
+                    except Exception as e:
+                        print(f"TTSWorker: Piper falló, usando pyttsx3 - {e}")
+                        if self.engine:
+                            self._speaking.set()
+                            self.engine.say(text)
+                            self.engine.runAndWait()
+                            self._speaking.clear()
+                elif self.engine:
+                    self._speaking.set()
                     self.engine.say(text)
                     self.engine.runAndWait()
+                    self._speaking.clear()
                 self.last_spoken_at = time.time()
             except Exception as e:
                 print(f"TTSWorker: error TTS -> {e}")
             finally:
-                self._speaking.clear()
                 try:
                     self.queue.task_done()
                 except Exception:
@@ -184,6 +327,75 @@ class TTSWorker:
 
     def is_speaking(self) -> bool:
         return self._speaking.is_set()
+
+    def _speak_with_piper(self, text: str) -> None:
+        """Synthesize and play audio using piper executable."""
+        piper_cmd = "piper.exe" if platform.system() == "Windows" else "piper"
+        
+        # Piper automáticamente añade .onnx y .onnx.json, así que pasamos solo la ruta base
+        model_base = str(self.piper_model_path).replace(".onnx", "")
+        
+        # Run piper as subprocess
+        piper_process = subprocess.Popen(
+            [piper_cmd, "--model", model_base, "--output-raw"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        audio_data, stderr_data = piper_process.communicate(input=text.encode())
+        
+        if not audio_data:
+            raise RuntimeError(f"Piper no generó audio: {stderr_data.decode()}")
+        
+        # Marcar speaking SOLO cuando reproducimos
+        self._speaking.set()
+        
+        # Play audio on Windows
+        if platform.system() == "Windows":
+            import winsound
+            temp_wav_path = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+                    temp_wav_path = Path(temp_wav.name)
+                with wave.open(str(temp_wav_path), "wb") as wav_file:
+                    wav_file.setnchannels(1)
+                    wav_file.setsampwidth(2)
+                    wav_file.setframerate(22050)
+                    wav_file.writeframes(audio_data)
+                winsound.PlaySound(str(temp_wav_path), winsound.SND_FILENAME)
+            finally:
+                if temp_wav_path and temp_wav_path.exists():
+                    try:
+                        temp_wav_path.unlink()
+                    except Exception:
+                        pass
+        else:
+            # Play audio on Linux
+            temp_wav_path = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+                    temp_wav_path = Path(temp_wav.name)
+                with wave.open(str(temp_wav_path), "wb") as wav_file:
+                    wav_file.setnchannels(1)
+                    wav_file.setsampwidth(2)
+                    wav_file.setframerate(22050)
+                    wav_file.writeframes(audio_data)
+                if shutil.which("aplay") is not None:
+                    subprocess.run(["aplay", "-q", str(temp_wav_path)], check=False)
+                elif shutil.which("paplay") is not None:
+                    subprocess.run(["paplay", str(temp_wav_path)], check=False)
+                else:
+                    raise RuntimeError("No se encontró aplay ni paplay")
+            finally:
+                if temp_wav_path and temp_wav_path.exists():
+                    try:
+                        temp_wav_path.unlink()
+                    except Exception:
+                        pass
+        
+        # Limpiar speaking después de reproducir
+        self._speaking.clear()
 
 
 def draw_label(frame, text: str, y: int, color: tuple[int, int, int]) -> None:
@@ -283,8 +495,9 @@ class CharacterFaceLoader:
 
 
 def main() -> None:
+    config = load_config()
     detectors = [GreetingDetector(), GreetingDetector()]  # one detector per hand
-    tts = TTSWorker()
+    tts = TTSWorker(config)
     model_path = ensure_model_file()
     character = CharacterFaceLoader()
 
@@ -361,7 +574,7 @@ def main() -> None:
                     detectors[hand_index].reset()
                 
                 if speech_triggered:
-                    tts.say("Hola, Bienvenido al family day de Día")
+                    tts.say("Hola, Bienvenido al family day de Dia")
             else:
                 for detector in detectors:
                     detector.reset()

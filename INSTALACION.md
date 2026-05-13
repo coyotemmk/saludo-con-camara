@@ -166,15 +166,75 @@ tts.say("Hola, Bienvenido al family day de Día")  # Cambia este texto
 
 ---
 
-## 🔊 Idiomas y Voces
+## 🎤 Usar Piper para Voces de Alta Calidad
 
-la app usa **pyttsx3** que soporta múltiples idiomas según tu SO:
+La app puede usar **Piper** (generador de voz local de alta calidad) si tienes los archivos de modelo y el ejecutable.
+
+### ¿Qué necesitas?
+
+1. **Archivos de modelo:** `voice/bmo.onnx` + `voice/bmo.onnx.json` (ya incluidos en tu carpeta `voice/`)
+2. **Ejecutable de Piper:** Necesitas descargar piper para tu SO
+
+### Instalar Piper
+
+**Windows:**
+1. Ve a https://github.com/rhasspy/piper/releases
+2. Descarga `piper_x86_64.msi` (instalador)
+3. Instálalo y **agrega piper al PATH de Windows**
+4. Verifica con: `piper --version`
+
+**Linux (Ubuntu/Debian):**
+```bash
+curl -O https://github.com/rhasspy/piper/releases/download/2024.1.31/piper_linux_x86_64.tar.gz
+tar xzf piper_linux_x86_64.tar.gz
+sudo mv piper /usr/local/bin/
+chmod +x /usr/local/bin/piper
+piper --version  # Verifica
+```
+
+**Raspberry Pi OS:**
+```bash
+curl -O https://github.com/rhasspy/piper/releases/download/2024.1.31/piper_linux_armv7l.tar.gz
+tar xzf piper_linux_armv7l.tar.gz
+sudo mv piper /usr/local/bin/
+chmod +x /usr/local/bin/piper
+```
+
+### Usar Piper en la app
+
+1. Asegúrate de que `voice/bmo.onnx` y `voice/bmo.onnx.json` existen
+2. Edita `config.json`:
+   ```json
+   {
+     "tts_backend": "piper",
+     "piper_voice_model": "voice/bmo.onnx"
+   }
+   ```
+3. Ejecuta la app: `./start.sh` o `python app.py`
+4. Al iniciar verás: `TTSWorker: voz Piper cargada desde voice/bmo.onnx`
+
+### Si Piper no funciona
+
+La app automáticamente usa **pyttsx3** (voz sistema) como fallback.
+Si Piper no se encuentra, verás:
+```
+TTSWorker: no se pudo cargar Piper; usando pyttsx3
+```
+
+Esto es normal y la app seguirá funcionando correctamente.
+
+---
+
+## 🔊 Idioma con pyttsx3 (Voz Sistema)
+
+Si Piper no está disponible, la app usa **pyttsx3** (voz del sistema):
+
+La voz por sistema con **pyttsx3** soporta múltiples idiomas según tu SO:
 
 - **Windows:** Voces instaladas del sistema
 - **Linux:** Instala `espeak-ng` primero:
   ```bash
   sudo apt-get install espeak-ng
-  pip install pyttsx3
   ```
 
 ---
