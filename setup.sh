@@ -37,17 +37,26 @@ fi
 echo "🔧 Creando entorno virtual..."
 python3 -m venv venv
 
-# Activar entorno virtual
-echo "✓ Activando entorno virtual..."
-source venv/bin/activate || . venv/Scripts/activate
+# Resolver binarios del entorno virtual
+VENV_PYTHON="venv/bin/python"
+VENV_PIP="venv/bin/pip"
+
+# Activar entorno virtual si existe
+if [ -f "venv/bin/activate" ]; then
+    echo "✓ Activando entorno virtual..."
+    # shellcheck disable=SC1091
+    . venv/bin/activate
+else
+    echo "⚠️  No se encontró venv/bin/activate, usando binarios directos del venv"
+fi
 
 # Actualizar pip
 echo "📦 Actualizando pip..."
-pip install --upgrade pip
+"$VENV_PYTHON" -m pip install --upgrade pip
 
 # Instalar dependencias Python
 echo "📦 Instalando dependencias Python..."
-pip install -r requirements.txt
+"$VENV_PYTHON" -m pip install -r requirements.txt
 
 # Descargar modelo de MediaPipe (Hand Landmarker)
 echo "⏳ Descargando modelo de Hand Landmarker (esto puede tardar)..."
