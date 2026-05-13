@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 # ========================================================================
 # Saludo con Cámara - Setup Script para Linux/Raspberry Pi
 # ========================================================================
@@ -14,17 +16,19 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     echo "📦 Actualizando paquetes del sistema..."
     sudo apt-get update
     
-    # Instalar dependencias del sistema
+    # Instalar dependencias del sistema (paquetes seguros y disponibles en Ubuntu/Mint)
     echo "📚 Instalando dependencias del sistema..."
     sudo apt-get install -y \
-        python3 python3-pip python3-venv \
-        libatlas-base-dev libjasper-dev libtiff5 libjasper1 libharfbuzz0b libwebp6 libtiff5 \
-        libopenjp2-7 libopenjp2-7-dev librpi-gpio-python3-dev \
-        libsrtp2-1 libopenjp2-7 \
-        python3-opencv libopencv-dev \
-        python3-pip python3-dev \
-        alsa-utils libsndfile1 \
-        espeak espeak-ng
+        python3 \
+        python3-pip \
+        python3-venv \
+        python3-dev \
+        build-essential \
+        libgl1 \
+        libglib2.0-0 \
+        libatlas-base-dev \
+        espeak-ng \
+        wget
     
 elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
     echo "✓ Sistema: Windows (PowerShell/Git Bash)"
@@ -44,7 +48,7 @@ VENV_PIP="./venv/bin/pip"
 # Verificar que se creó bien
 if [ ! -f "$VENV_PYTHON" ]; then
     echo "❌ Error: No se pudo crear el entorno virtual."
-    echo "Intenta: python3 -m venv venv"
+    echo "Intenta instalar primero: sudo apt-get install -y python3-venv"
     exit 1
 fi
 

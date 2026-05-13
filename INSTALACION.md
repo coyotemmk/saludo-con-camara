@@ -85,11 +85,15 @@ Debe mostrar **Python 3.8 o superior**. Ahora sí puedes continuar con la instal
    ```bash
    chmod +x setup.sh start.sh
    ```
-3. **Ejecuta el instalador:**
+3. **Si ya intentaste instalar antes y falló, limpia el entorno viejo:**
+   ```bash
+   rm -rf venv
+   ```
+4. **Ejecuta el instalador:**
    ```bash
    ./setup.sh
    ```
-4. **Inicia la app:**
+5. **Inicia la app:**
    ```bash
    ./start.sh
    ```
