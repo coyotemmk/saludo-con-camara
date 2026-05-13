@@ -13,7 +13,57 @@
 
 ---
 
-## 🚀 Instalación Rápida
+## � Verificar / Instalar Python 3
+
+**IMPORTANTE:** Python 3 es OBLIGATORIO. La mayoría de Linux ya lo tienen, pero es bueno verificar.
+
+### Verificar que Python 3 está instalado
+
+```bash
+python3 --version
+```
+
+Si ves algo como `Python 3.10.x` o superior, ¡ya está! Sigue adelante.
+
+Si da error o no aparece nada, instálalo:
+
+### Instalar Python 3 (si no lo tienes)
+
+**En Debian/Ubuntu/Raspberry Pi OS:**
+```bash
+sudo apt-get update
+sudo apt-get install -y python3 python3-pip python3-venv
+```
+
+**En Fedora/RHEL/CentOS:**
+```bash
+sudo dnf install -y python3 python3-pip
+```
+
+**En Arch Linux:**
+```bash
+sudo pacman -S python python-pip
+```
+
+**En macOS (con Homebrew):**
+```bash
+brew install python3
+```
+
+**En Windows:**
+- Descarga desde [python.org](https://www.python.org/downloads/)
+- **IMPORTANTE:** Marca ✅ "Add Python to PATH" durante la instalación
+
+### Verificar de nuevo
+```bash
+python3 --version
+```
+
+Debe mostrar **Python 3.8 o superior**. Ahora sí puedes continuar con la instalación.
+
+---
+
+## �🚀 Instalación Rápida
 
 ### En Windows
 
@@ -126,6 +176,37 @@ la app usa **pyttsx3** que soporta múltiples idiomas según tu SO:
 ---
 
 ## 🐛 Troubleshooting
+
+### "python: command not found" o "python: no such file or directory"
+**Tu Linux no tiene Python 3 instalado.**
+
+Solución:
+```bash
+sudo apt-get update
+sudo apt-get install -y python3 python3-pip python3-venv
+python3 --version  # Verifica la instalación
+```
+
+Luego vuelve a ejecutar:
+```bash
+./setup.sh
+./start.sh
+```
+
+### "venv/bin/activate: No such file or directory"
+**El entorno virtual no se creó correctamente.**
+
+Solución:
+```bash
+# Elimina el venv corrupto
+rm -rf venv
+
+# Vuelve a crear
+python3 -m venv venv
+
+# Reinicia el instalador
+./setup.sh
+```
 
 ### "No module named 'mediapipe'"
 ```bash
