@@ -330,6 +330,10 @@ class TTSWorker:
         while True:
             text = self.queue.get()
             print(f"TTSWorker: procesando -> {text}")
+            
+            # Marcar como "ocupado" desde el inicio del procesamiento
+            self._speaking.set()
+            
             try:
                 now = time.time()
                 wait_seconds = self.min_interval_seconds - (now - self.last_spoken_at)
@@ -342,19 +346,17 @@ class TTSWorker:
                     except Exception as e:
                         print(f"TTSWorker: Piper falló, usando pyttsx3 - {e}")
                         if self.engine:
-                            self._speaking.set()
                             self.engine.say(text)
                             self.engine.runAndWait()
-                            self._speaking.clear()
                 elif self.engine:
-                    self._speaking.set()
                     self.engine.say(text)
                     self.engine.runAndWait()
-                    self._speaking.clear()
                 self.last_spoken_at = time.time()
             except Exception as e:
                 print(f"TTSWorker: error TTS -> {e}")
             finally:
+                # Limpiar ocupado después de terminar completamente
+                self._speaking.clear()
                 try:
                     self.queue.task_done()
                 except Exception:
@@ -386,9 +388,6 @@ class TTSWorker:
         
         if not audio_data:
             raise RuntimeError(f"Piper no generó audio: {stderr_data.decode()}")
-        
-        # Marcar speaking SOLO cuando reproducimos
-        self._speaking.set()
         
         # Play audio on Windows
         if platform.system() == "Windows":
@@ -432,9 +431,6 @@ class TTSWorker:
                         temp_wav_path.unlink()
                     except Exception:
                         pass
-        
-        # Limpiar speaking después de reproducir
-        self._speaking.clear()
 
 
 def draw_label(frame, text: str, y: int, color: tuple[int, int, int]) -> None:
@@ -577,8 +573,14 @@ def main() -> None:
             status_color = (255, 255, 255)
             speech_triggered = False
             hands_detected = 0
-
-            if result.hand_landmarks and result.handedness:
+            next_state = "listening"
+            
+            # Si está hablando, ignorar gestos y mostrar estado "capturing"
+            if tts.is_speaking():
+                status_text = "Procesando voz..."
+                status_color = (0, 200, 255)
+                next_state = "capturing"
+            elif result.hand_landmarks and result.handedness:
                 hands_detected = len(result.hand_landmarks)
                 for hand_index in range(hands_detected):
                     hand_landmarks = result.hand_landmarks[hand_index]
@@ -617,18 +619,13 @@ def main() -> None:
             else:
                 for detector in detectors:
                     detector.reset()
-                status_text = "Busca tu mano en la camara"
-                status_color = (255, 255, 255)
 
-            speaking = tts.is_speaking()
-            next_state = "speaking" if speaking else "listening"
+            # Actualizar estado según actividad
             if next_state != current_state:
                 current_state = next_state
                 character.reset_state(current_state)
 
-            if speaking and not speech_triggered:
-                status_text = "Hablando"
-                status_color = (0, 255, 0)
+            speaking = tts.is_speaking()
 
             draw_label(frame, "Presiona q para salir", 30, (255, 255, 255))
             draw_label(frame, status_text, 70, status_color)
