@@ -1,6 +1,7 @@
 from collections import deque
 import math
 import json
+import os
 from pathlib import Path
 import shutil
 import urllib.request
@@ -170,23 +171,35 @@ def find_piper_voice_model(config: dict) -> tuple[Optional[Path], Optional[Path]
     model_path = Path(str(config.get("piper_voice_model", "voice/bmo.onnx")))
     config_path = Path(str(config.get("piper_voice_config", "voice/bmo.onnx.json")))
 
-    # Try primary location
-    if model_path.exists() and config_path.exists():
-        print(f"Piper: Modelo encontrado en {model_path}")
-        return model_path, config_path
+    # Try path as-is first (relative or absolute)
+    if model_path.is_absolute():
+        if model_path.exists() and config_path.exists():
+            print(f"Piper: Modelo encontrado en {model_path}")
+            return model_path, config_path
+    else:
+        # Relative path: resolve from current working directory
+        resolved_model = Path.cwd() / model_path
+        resolved_config = Path.cwd() / config_path
+        if resolved_model.exists() and resolved_config.exists():
+            print(f"Piper: Modelo encontrado en {resolved_model}")
+            return resolved_model, resolved_config
     
     # Try alternative paths
     alternatives = [
         (Path("./voice/bmo.onnx"), Path("./voice/bmo.onnx.json")),
         (Path("./bmo.onnx"), Path("./bmo.onnx.json")),
+        (Path("voice/es_ES-davefx-medium.onnx"), Path("voice/es_ES-davefx-medium.onnx.json")),
+        (Path("./voice/es_ES-davefx-medium.onnx"), Path("./voice/es_ES-davefx-medium.onnx.json")),
     ]
     
     for alt_model, alt_config in alternatives:
-        if alt_model.exists() and alt_config.exists():
-            print(f"Piper: Modelo encontrado en {alt_model}")
-            return alt_model, alt_config
+        resolved_model = Path.cwd() / alt_model if not alt_model.is_absolute() else alt_model
+        resolved_config = Path.cwd() / alt_config if not alt_config.is_absolute() else alt_config
+        if resolved_model.exists() and resolved_config.exists():
+            print(f"Piper: Modelo encontrado en {resolved_model}")
+            return resolved_model, resolved_config
     
-    print(f"Piper: No se encontró modelo en {model_path}")
+    print(f"Piper: No se encontró modelo")
     return None, None
 
 
@@ -206,9 +219,35 @@ class TTSWorker:
         self.thread.start()
 
     def _check_piper_available(self) -> bool:
-        """Check if piper executable is available."""
+        """Check if piper executable is available by actually trying to run it."""
         piper_cmd = "piper.exe" if platform.system() == "Windows" else "piper"
-        return shutil.which(piper_cmd) is not None
+        
+        # First, try shutil.which()
+        if shutil.which(piper_cmd) is not None:
+            return True
+        
+        # On Linux, try common installation paths
+        if platform.system() != "Windows":
+            common_paths = [
+                "/usr/local/bin/piper",
+                "/usr/bin/piper",
+                os.path.expanduser("~/.local/bin/piper"),
+            ]
+            for path in common_paths:
+                if os.path.isfile(path) and os.access(path, os.X_OK):
+                    return True
+        
+        # Try to run piper --version as a fallback
+        try:
+            subprocess.run([piper_cmd, "--version"], 
+                         stdout=subprocess.DEVNULL, 
+                         stderr=subprocess.DEVNULL, 
+                         timeout=2)
+            return True
+        except Exception:
+            pass
+        
+        return False
 
     def _init_engine(self) -> None:
         """Initialize pyttsx3 engine with Spanish voice if available."""
@@ -332,12 +371,12 @@ class TTSWorker:
         """Synthesize and play audio using piper executable."""
         piper_cmd = "piper.exe" if platform.system() == "Windows" else "piper"
         
-        # Piper automáticamente añade .onnx y .onnx.json, así que pasamos solo la ruta base
-        model_base = str(self.piper_model_path).replace(".onnx", "")
+        # Use absolute path for model
+        model_abs = os.path.abspath(str(self.piper_model_path)).replace(".onnx", "")
         
         # Run piper as subprocess
         piper_process = subprocess.Popen(
-            [piper_cmd, "--model", model_base, "--output-raw"],
+            [piper_cmd, "--model", model_abs, "--output-raw"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE

@@ -185,6 +185,12 @@ La app puede usar **Piper** (generador de voz local de alta calidad) si tienes l
 
 **Linux (Ubuntu/Debian):**
 ```bash
+chmod +x install_piper.sh
+./install_piper.sh
+```
+
+O manualmente:
+```bash
 curl -O https://github.com/rhasspy/piper/releases/download/2024.1.31/piper_linux_x86_64.tar.gz
 tar xzf piper_linux_x86_64.tar.gz
 sudo mv piper /usr/local/bin/
@@ -192,7 +198,15 @@ chmod +x /usr/local/bin/piper
 piper --version  # Verifica
 ```
 
-**Raspberry Pi OS:**
+**Raspberry Pi OS (ARM):**
+```bash
+chmod +x install_piper.sh
+./install_piper.sh
+```
+
+(El script automáticamente detecta si tienes ARMv7 o ARM64)
+
+O manualmente:
 ```bash
 curl -O https://github.com/rhasspy/piper/releases/download/2024.1.31/piper_linux_armv7l.tar.gz
 tar xzf piper_linux_armv7l.tar.gz
@@ -221,7 +235,20 @@ Si Piper no se encuentra, verás:
 TTSWorker: no se pudo cargar Piper; usando pyttsx3
 ```
 
-Esto es normal y la app seguirá funcionando correctamente.
+**¿Qué significa?**
+- Significa que Piper no está instalado o no se encuentra en el PATH
+- La app seguirá funcionando correctamente con la voz del sistema
+- Es completamente seguro ignorar este mensaje
+
+**¿Cómo sé si Piper está instalado?**
+```bash
+piper --version
+```
+
+Si ves una versión, Piper está instalado. Si dice "command not found", instálalo con:
+```bash
+./install_piper.sh  # En la carpeta del proyecto
+```
 
 ---
 
