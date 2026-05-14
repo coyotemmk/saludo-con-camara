@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import wave
 from typing import Optional
+import hashlib
 
 import cv2
 import numpy as np
@@ -24,10 +25,16 @@ import platform
 
 CONFIG_FILE = Path("config.json")
 
+CAPTURE_WIDTH = 640
+CAPTURE_HEIGHT = 480
+DETECTION_WIDTH = 320
+DETECTION_HEIGHT = 240
+
 DEFAULT_CONFIG = {
     "tts_backend": "auto",
     "piper_voice_model": "voice/bmo.onnx",
     "piper_voice_config": "voice/bmo.onnx.json",
+    "show_camera_preview": False,
     "system_voice_name": "",
     "system_voice_rate": 150,
     "system_voice_volume": 0.9,
@@ -209,11 +216,17 @@ class TTSWorker:
         self.min_interval_seconds = 0.0
         self.last_spoken_at = 0.0
         self._speaking = threading.Event()
+        self._synthesizing = threading.Event()  # Flag interno: síntesis en progreso
         self.engine = None
         self.piper_voice = None
         self.config = config
         self.tts_backend = str(config.get("tts_backend", "auto")).lower()
         self.piper_model_path, self.piper_config_path = find_piper_voice_model(config)
+        
+        # Configurar caché de audio
+        self.cache_dir = Path("tts_cache")
+        self.cache_dir.mkdir(exist_ok=True)
+        
         self._init_engine()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
@@ -331,9 +344,6 @@ class TTSWorker:
             text = self.queue.get()
             print(f"TTSWorker: procesando -> {text}")
             
-            # Marcar como "ocupado" desde el inicio del procesamiento
-            self._speaking.set()
-            
             try:
                 now = time.time()
                 wait_seconds = self.min_interval_seconds - (now - self.last_spoken_at)
@@ -346,16 +356,20 @@ class TTSWorker:
                     except Exception as e:
                         print(f"TTSWorker: Piper falló, usando pyttsx3 - {e}")
                         if self.engine:
+                            self._speaking.set()
                             self.engine.say(text)
                             self.engine.runAndWait()
+                            self._speaking.clear()
                 elif self.engine:
+                    self._speaking.set()
                     self.engine.say(text)
                     self.engine.runAndWait()
+                    self._speaking.clear()
                 self.last_spoken_at = time.time()
             except Exception as e:
                 print(f"TTSWorker: error TTS -> {e}")
             finally:
-                # Limpiar ocupado después de terminar completamente
+                # Asegurar que se limpia el flag
                 self._speaking.clear()
                 try:
                     self.queue.task_done()
@@ -369,68 +383,118 @@ class TTSWorker:
     def is_speaking(self) -> bool:
         return self._speaking.is_set()
 
-    def _speak_with_piper(self, text: str) -> None:
-        """Synthesize and play audio using piper executable."""
-        piper_cmd = "piper.exe" if platform.system() == "Windows" else "piper"
+    def is_synthesizing(self) -> bool:
+        """Retorna True si se está sintetizando audio (fase de texto a voz)."""
+        return self._synthesizing.is_set()
+
+    def _get_cache_path(self, text: str) -> Path:
+        """Generar ruta de caché basada en hash MD5 del texto."""
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+        return self.cache_dir / f"{text_hash}.wav"
+
+    def _get_or_synthesize_audio(self, text: str) -> bytes:
+        """Obtener audio del caché o sintetizar si no existe."""
+        cache_path = self._get_cache_path(text)
         
-        # Use absolute path for model
+        # Si existe en caché, cargar
+        if cache_path.exists():
+            print(f"TTSWorker: usando audio en caché para '{text[:40]}...'")
+            with open(cache_path, "rb") as f:
+                return f.read()
+        
+        # Si no existe, sintetizar
+        print(f"TTSWorker: sintetizando nuevo audio para '{text[:40]}...'")
+        piper_cmd = "piper.exe" if platform.system() == "Windows" else "piper"
         model_abs = os.path.abspath(str(self.piper_model_path)).replace(".onnx", "")
         
-        # Run piper as subprocess
         piper_process = subprocess.Popen(
-            [piper_cmd, "--model", model_abs, "--output-raw"],
+            [piper_cmd, "--model", model_abs, "--output-raw", "--length-scale", "0.7"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
         
         audio_data, stderr_data = piper_process.communicate(input=text.encode())
-        
         if not audio_data:
             raise RuntimeError(f"Piper no generó audio: {stderr_data.decode()}")
         
-        # Play audio on Windows
-        if platform.system() == "Windows":
-            import winsound
-            temp_wav_path = None
-            try:
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
-                    temp_wav_path = Path(temp_wav.name)
-                with wave.open(str(temp_wav_path), "wb") as wav_file:
-                    wav_file.setnchannels(1)
-                    wav_file.setsampwidth(2)
-                    wav_file.setframerate(22050)
-                    wav_file.writeframes(audio_data)
-                winsound.PlaySound(str(temp_wav_path), winsound.SND_FILENAME)
-            finally:
-                if temp_wav_path and temp_wav_path.exists():
-                    try:
-                        temp_wav_path.unlink()
-                    except Exception:
-                        pass
-        else:
-            # Play audio on Linux
-            temp_wav_path = None
-            try:
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
-                    temp_wav_path = Path(temp_wav.name)
-                with wave.open(str(temp_wav_path), "wb") as wav_file:
-                    wav_file.setnchannels(1)
-                    wav_file.setsampwidth(2)
-                    wav_file.setframerate(22050)
-                    wav_file.writeframes(audio_data)
-                if shutil.which("aplay") is not None:
-                    subprocess.run(["aplay", "-q", str(temp_wav_path)], check=False)
-                elif shutil.which("paplay") is not None:
-                    subprocess.run(["paplay", str(temp_wav_path)], check=False)
-                else:
-                    raise RuntimeError("No se encontró aplay ni paplay")
-            finally:
-                if temp_wav_path and temp_wav_path.exists():
-                    try:
-                        temp_wav_path.unlink()
-                    except Exception:
-                        pass
+        # Guardar en caché
+        try:
+            with open(cache_path, "wb") as f:
+                f.write(audio_data)
+            print(f"TTSWorker: audio guardado en caché")
+        except Exception as e:
+            print(f"TTSWorker: no se pudo guardar en caché: {e}")
+        
+        return audio_data
+
+    def _speak_with_piper(self, text: str) -> None:
+        """Synthesize and play audio using piper executable."""
+        
+        # Marcar fase de síntesis
+        self._synthesizing.set()
+        
+        try:
+            # Obtener audio del caché o sintetizar
+            audio_data = self._get_or_synthesize_audio(text)
+            
+            # Síntesis completada, ahora reproducir
+            self._synthesizing.clear()
+            
+            # Play audio on Windows
+            if platform.system() == "Windows":
+                import winsound
+                temp_wav_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+                        temp_wav_path = Path(temp_wav.name)
+                    with wave.open(str(temp_wav_path), "wb") as wav_file:
+                        wav_file.setnchannels(1)
+                        wav_file.setsampwidth(2)
+                        wav_file.setframerate(22050)
+                        wav_file.writeframes(audio_data)
+                    # AQUÍ comienza reproducción real - activar flag "speaking"
+                    self._speaking.set()
+                    winsound.PlaySound(str(temp_wav_path), winsound.SND_FILENAME)
+                finally:
+                    # Limpiar después de reproducción
+                    self._speaking.clear()
+                    if temp_wav_path and temp_wav_path.exists():
+                        try:
+                            temp_wav_path.unlink()
+                        except Exception:
+                            pass
+            else:
+                # Play audio on Linux
+                temp_wav_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+                        temp_wav_path = Path(temp_wav.name)
+                    with wave.open(str(temp_wav_path), "wb") as wav_file:
+                        wav_file.setnchannels(1)
+                        wav_file.setsampwidth(2)
+                        wav_file.setframerate(22050)
+                        wav_file.writeframes(audio_data)
+                    # AQUÍ comienza reproducción real - activar flag "speaking"
+                    self._speaking.set()
+                    if shutil.which("aplay") is not None:
+                        subprocess.run(["aplay", "-q", str(temp_wav_path)], check=False)
+                    elif shutil.which("paplay") is not None:
+                        subprocess.run(["paplay", str(temp_wav_path)], check=False)
+                    else:
+                        raise RuntimeError("No se encontró aplay ni paplay")
+                finally:
+                    # Limpiar después de reproducción
+                    self._speaking.clear()
+                    if temp_wav_path and temp_wav_path.exists():
+                        try:
+                            temp_wav_path.unlink()
+                        except Exception:
+                            pass
+        finally:
+            # Asegurar que ambos flags se limpian en cualquier caso
+            self._synthesizing.clear()
+            self._speaking.clear()
 
 
 def draw_label(frame, text: str, y: int, color: tuple[int, int, int]) -> None:
@@ -446,7 +510,7 @@ class CharacterFaceLoader:
         self.active_state = None
         # default frame intervals (seconds)
         self.frame_interval = 0.25
-        self.speaking_interval = 0.15
+        self.speaking_interval = 0.15  # Más rápido para animación fluida de labios
         self.listening_interval = 2.0  # longer for occasional blink/life
 
         # mapping logical states from this app to folders
@@ -479,7 +543,11 @@ class CharacterFaceLoader:
                         self.images[state_name] = loaded_imgs
                         self.index[state_name] = 0
                         self.last_update[state_name] = time.time()
-                        print(f"✓ Cargados {len(loaded_imgs)} frames para '{state_name}'")
+                        # Info detallada para debugging
+                        if state_name == "speaking":
+                            print(f"✓ Cargados {len(loaded_imgs)} frames para '{state_name}': {[p.name for p in sorted(state_dir.glob('*.png'))]}")
+                        else:
+                            print(f"✓ Cargados {len(loaded_imgs)} frames para '{state_name}'")
 
     def get_frame(self, state: str):
         # kept for backward compatibility
@@ -531,16 +599,17 @@ class CharacterFaceLoader:
 
 def main() -> None:
     config = load_config()
-    detectors = [GreetingDetector(), GreetingDetector()]  # one detector per hand
+    detectors = [GreetingDetector()]
     tts = TTSWorker(config)
     model_path = ensure_model_file()
     character = CharacterFaceLoader()
+    show_camera_preview = bool(config.get("show_camera_preview", False))
 
     base_options = python.BaseOptions(model_asset_path=str(model_path))
     options = vision.HandLandmarkerOptions(
         base_options=base_options,
         running_mode=vision.RunningMode.IMAGE,
-        num_hands=2,
+        num_hands=1,
         min_hand_detection_confidence=0.5,
         min_hand_presence_confidence=0.5,
         min_tracking_confidence=0.5,
@@ -549,6 +618,10 @@ def main() -> None:
     camera = cv2.VideoCapture(0)
     if not camera.isOpened():
         raise RuntimeError("No se pudo abrir la camara del dispositivo.")
+
+    camera.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
+    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
+    camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     current_state = "listening"
 
@@ -565,7 +638,8 @@ def main() -> None:
                 break
 
             frame = cv2.flip(frame, 1)
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            detection_frame = cv2.resize(frame, (DETECTION_WIDTH, DETECTION_HEIGHT))
+            rgb_frame = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
             result = hands.detect(mp_image)
 
@@ -575,11 +649,17 @@ def main() -> None:
             hands_detected = 0
             next_state = "listening"
             
-            # Si está hablando, ignorar gestos y mostrar estado "capturing"
-            if tts.is_speaking():
+            # Lógica de estados según actividad TTS
+            if tts.is_synthesizing():
+                # Fase de síntesis: mostrar "Procesando voz..." y estado capturing
                 status_text = "Procesando voz..."
                 status_color = (0, 200, 255)
                 next_state = "capturing"
+            elif tts.is_speaking():
+                # Fase de reproducción: mostrar estado speaking (con animación de boca)
+                status_text = "Hablando..."
+                status_color = (0, 255, 100)
+                next_state = "speaking"
             elif result.hand_landmarks and result.handedness:
                 hands_detected = len(result.hand_landmarks)
                 for hand_index in range(hands_detected):
@@ -588,10 +668,11 @@ def main() -> None:
                     wrist_x = hand_center_x(hand_landmarks)
                     palm_open = is_open_palm(hand_landmarks, handedness_label)
 
-                    for landmark in hand_landmarks:
-                        x = int(landmark.x * frame.shape[1])
-                        y = int(landmark.y * frame.shape[0])
-                        cv2.circle(frame, (x, y), 4, (0, 255, 0), -1)
+                    if show_camera_preview:
+                        for landmark in hand_landmarks:
+                            x = int(landmark.x * frame.shape[1])
+                            y = int(landmark.y * frame.shape[0])
+                            cv2.circle(frame, (x, y), 4, (0, 255, 0), -1)
 
                     # Use the detector for this hand
                     hand_speech = detectors[hand_index].update(wrist_x, palm_open)
@@ -633,24 +714,23 @@ def main() -> None:
             character_img = character.next_frame(current_state, speaking=speaking)
             if character_img is not None:
                 character_resized = resize_with_aspect_ratio(character_img, 1280, 720, (201, 227, 193))
-                frame_resized = cv2.resize(frame, (320, 240))
-                
-                # Overlay camera in bottom-right corner
                 canvas = character_resized.copy()
-                cam_x = canvas.shape[1] - frame_resized.shape[1] - 10
-                cam_y = canvas.shape[0] - frame_resized.shape[0] - 10
-                canvas[cam_y:cam_y + frame_resized.shape[0], cam_x:cam_x + frame_resized.shape[1]] = frame_resized
+                if show_camera_preview:
+                    frame_resized = cv2.resize(frame, (320, 240))
+                    cam_x = canvas.shape[1] - frame_resized.shape[1] - 10
+                    cam_y = canvas.shape[0] - frame_resized.shape[0] - 10
+                    canvas[cam_y:cam_y + frame_resized.shape[0], cam_x:cam_x + frame_resized.shape[1]] = frame_resized
             else:
                 placeholder = np.zeros((720, 1280, 3), dtype=np.uint8)
                 placeholder[:] = [201, 227, 193]
                 cv2.putText(placeholder, "Coloca PNGs en", (500, 350), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
                 cv2.putText(placeholder, "faces/" + current_state, (550, 400), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
-                
-                frame_resized = cv2.resize(frame, (320, 240))
                 canvas = placeholder.copy()
-                cam_x = canvas.shape[1] - frame_resized.shape[1] - 10
-                cam_y = canvas.shape[0] - frame_resized.shape[0] - 10
-                canvas[cam_y:cam_y + frame_resized.shape[0], cam_x:cam_x + frame_resized.shape[1]] = frame_resized
+                if show_camera_preview:
+                    frame_resized = cv2.resize(frame, (320, 240))
+                    cam_x = canvas.shape[1] - frame_resized.shape[1] - 10
+                    cam_y = canvas.shape[0] - frame_resized.shape[0] - 10
+                    canvas[cam_y:cam_y + frame_resized.shape[0], cam_x:cam_x + frame_resized.shape[1]] = frame_resized
 
             cv2.imshow(window_name, canvas)
             key = cv2.waitKey(1) & 0xFF
