@@ -19,6 +19,7 @@ import numpy as np
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+from piper import PiperVoice, SynthesisConfig
 import pyttsx3
 import platform
 
@@ -112,6 +113,33 @@ class GreetingDetector:
         self.last_trigger_time = 0.0
 
 
+class ThumbsUpDetector:
+    def __init__(self, cooldown_seconds: float = 3.0) -> None:
+        self.cooldown_seconds = cooldown_seconds
+        self.last_trigger_time = 0.0
+        self.is_active = False
+
+    def update(self, thumbs_up: bool) -> bool:
+        now = time.time()
+
+        if not thumbs_up:
+            self.is_active = False
+            return False
+
+        if self.is_active:
+            return False
+
+        if now - self.last_trigger_time < self.cooldown_seconds:
+            return False
+
+        self.is_active = True
+        self.last_trigger_time = now
+        return True
+
+    def reset(self) -> None:
+        self.is_active = False
+
+
 def is_open_palm(landmarks, handedness_label: str) -> bool:
     fingers = [
         (8, 6),
@@ -136,6 +164,30 @@ def is_open_palm(landmarks, handedness_label: str) -> bool:
         extended += 1
 
     return extended >= 4
+
+
+def is_thumbs_up(landmarks, handedness_label: str) -> bool:
+    """Detecta si la mano está mostrando el gesto thumbs up (pulgar arriba)."""
+    wrist = landmarks[0]
+    thumb_tip = landmarks[4]
+    thumb_ip = landmarks[3]
+    
+    # El pulgar debe estar más arriba que la muñeca (Y menor)
+    thumb_above_wrist = thumb_tip.y < wrist.y - 0.1
+    
+    # El pulgar debe estar extendido (comparar con la articulación intermedia)
+    thumb_extended = abs(thumb_tip.y - thumb_ip.y) > 0.05
+    
+    # Los otros dedos deben estar cerrados/doblados
+    fingers = [(8, 6), (12, 10), (16, 14), (20, 18)]
+    closed_fingers = 0
+    for tip_index, pip_index in fingers:
+        if landmarks[tip_index].y >= landmarks[pip_index].y:  # dedo cerrado/doblado
+            closed_fingers += 1
+    
+    fingers_closed = closed_fingers >= 3  # al menos 3 dedos cerrados
+    
+    return thumb_above_wrist and thumb_extended and fingers_closed
 
 
 def hand_center_x(landmarks) -> float:
@@ -230,37 +282,25 @@ class TTSWorker:
         self._init_engine()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
+        self._warm_cache_thread = threading.Thread(target=self._warm_cache, daemon=True)
+        self._warm_cache_thread.start()
 
-    def _check_piper_available(self) -> bool:
-        """Check if piper executable is available by actually trying to run it."""
-        piper_cmd = "piper.exe" if platform.system() == "Windows" else "piper"
-        
-        # First, try shutil.which()
-        if shutil.which(piper_cmd) is not None:
-            return True
-        
-        # On Linux, try common installation paths
-        if platform.system() != "Windows":
-            common_paths = [
-                "/usr/local/bin/piper",
-                "/usr/bin/piper",
-                os.path.expanduser("~/.local/bin/piper"),
-            ]
-            for path in common_paths:
-                if os.path.isfile(path) and os.access(path, os.X_OK):
-                    return True
-        
-        # Try to run piper --version as a fallback
+    def _load_piper_voice(self) -> bool:
+        """Load Piper voice directly through the Python package to avoid piper.exe."""
         try:
-            subprocess.run([piper_cmd, "--version"], 
-                         stdout=subprocess.DEVNULL, 
-                         stderr=subprocess.DEVNULL, 
-                         timeout=2)
+            if self.piper_model_path is None:
+                return False
+
+            self.piper_voice = PiperVoice.load(
+                self.piper_model_path,
+                self.piper_config_path,
+            )
+            print(f"TTSWorker: voz Piper cargada desde {self.piper_model_path}")
             return True
-        except Exception:
-            pass
-        
-        return False
+        except Exception as exc:
+            self.piper_voice = None
+            print(f"TTSWorker: no se pudo cargar Piper desde Python - {exc}")
+            return False
 
     def _init_engine(self) -> None:
         """Initialize pyttsx3 engine with Spanish voice if available."""
@@ -275,9 +315,8 @@ class TTSWorker:
 
         use_piper = self.tts_backend in ("auto", "piper")
         if use_piper and self.piper_model_path is not None:
-            if self._check_piper_available():
-                self.piper_voice = True  # Flag: Piper está disponible
-                print(f"TTSWorker: voz Piper cargada desde {self.piper_model_path}")
+            if self._load_piper_voice():
+                pass
             else:
                 self.piper_voice = None
                 if self.tts_backend == "piper":
@@ -404,19 +443,17 @@ class TTSWorker:
         
         # Si no existe, sintetizar
         print(f"TTSWorker: sintetizando nuevo audio para '{text[:40]}...'")
-        piper_cmd = "piper.exe" if platform.system() == "Windows" else "piper"
-        model_abs = os.path.abspath(str(self.piper_model_path)).replace(".onnx", "")
-        
-        piper_process = subprocess.Popen(
-            [piper_cmd, "--model", model_abs, "--output-raw", "--length-scale", "0.7"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        
-        audio_data, stderr_data = piper_process.communicate(input=text.encode())
+        if not self.piper_voice:
+            raise RuntimeError("Piper no está disponible en memoria")
+
+        syn_config = SynthesisConfig(length_scale=0.7)
+        audio_parts = []
+        for audio_chunk in self.piper_voice.synthesize(text, syn_config=syn_config):
+            audio_parts.append(audio_chunk.audio_int16_bytes)
+
+        audio_data = b"".join(audio_parts)
         if not audio_data:
-            raise RuntimeError(f"Piper no generó audio: {stderr_data.decode()}")
+            raise RuntimeError("Piper no generó audio")
         
         # Guardar en caché
         try:
@@ -427,6 +464,22 @@ class TTSWorker:
             print(f"TTSWorker: no se pudo guardar en caché: {e}")
         
         return audio_data
+
+    def _warm_cache(self) -> None:
+        """Pre-genera en segundo plano las frases más usadas con la misma voz Piper."""
+        if not self.piper_voice:
+            return
+
+        phrases = [
+            "Hola, Bienvenido al family day de Dia",
+            "Jajaja, ¡qué guay! Tú sí que tienes estilo, parcero",
+        ]
+
+        for phrase in phrases:
+            try:
+                self._get_or_synthesize_audio(phrase)
+            except Exception as exc:
+                print(f"TTSWorker: no se pudo precargar caché para '{phrase[:30]}...': {exc}")
 
     def _speak_with_piper(self, text: str) -> None:
         """Synthesize and play audio using piper executable."""
@@ -448,10 +501,13 @@ class TTSWorker:
                 try:
                     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
                         temp_wav_path = Path(temp_wav.name)
+                    sample_rate = 22050
+                    if self.piper_voice is not None:
+                        sample_rate = int(getattr(self.piper_voice.config, "sample_rate", sample_rate))
                     with wave.open(str(temp_wav_path), "wb") as wav_file:
                         wav_file.setnchannels(1)
                         wav_file.setsampwidth(2)
-                        wav_file.setframerate(22050)
+                        wav_file.setframerate(sample_rate)
                         wav_file.writeframes(audio_data)
                     # AQUÍ comienza reproducción real - activar flag "speaking"
                     self._speaking.set()
@@ -470,10 +526,13 @@ class TTSWorker:
                 try:
                     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
                         temp_wav_path = Path(temp_wav.name)
+                    sample_rate = 22050
+                    if self.piper_voice is not None:
+                        sample_rate = int(getattr(self.piper_voice.config, "sample_rate", sample_rate))
                     with wave.open(str(temp_wav_path), "wb") as wav_file:
                         wav_file.setnchannels(1)
                         wav_file.setsampwidth(2)
-                        wav_file.setframerate(22050)
+                        wav_file.setframerate(sample_rate)
                         wav_file.writeframes(audio_data)
                     # AQUÍ comienza reproducción real - activar flag "speaking"
                     self._speaking.set()
@@ -573,13 +632,13 @@ class CharacterFaceLoader:
             self.last_update[mapped_state] = 0.0
 
         now = time.time()
-        # Choose interval: speaking is fast, listening occasionally changes for life, others static
+        # Choose interval: speaking is fast, thinking and listening occasionally changes for life, others static
         if speaking:
             interval = self.speaking_interval
-        elif mapped_state == "listening" and len(frames) > 1:
-            interval = self.listening_interval  # longer interval for occasional blink
+        elif (mapped_state == "listening" or mapped_state == "thinking") and len(frames) > 1:
+            interval = self.listening_interval  # longer interval for occasional blink/thinking animation
         else:
-            interval = float('inf')  # never auto-advance if not speaking or listening multi-frame
+            interval = float('inf')  # never auto-advance if not speaking, listening or thinking
 
         last = self.last_update.get(mapped_state, 0.0)
         current_index = self.index.get(mapped_state, 0)
@@ -600,10 +659,11 @@ class CharacterFaceLoader:
 def main() -> None:
     config = load_config()
     detectors = [GreetingDetector()]
+    thumbs_up_detector = ThumbsUpDetector(cooldown_seconds=3.0)
     tts = TTSWorker(config)
     model_path = ensure_model_file()
     character = CharacterFaceLoader()
-    show_camera_preview = bool(config.get("show_camera_preview", False))
+    show_camera_preview = bool(config.get("show_camera_preview", config.get("show_camara_preview", False)))
 
     base_options = python.BaseOptions(model_asset_path=str(model_path))
     options = vision.HandLandmarkerOptions(
@@ -624,6 +684,8 @@ def main() -> None:
     camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     current_state = "listening"
+    hand_presence_start = None  # timestamp cuando se detectó mano por primera vez
+    hand_presence_threshold = 0.5  # segundos antes de cambiar a listening
 
     # Create and configure fullscreen window
     window_name = "Saludo con camara"
@@ -647,7 +709,7 @@ def main() -> None:
             status_color = (255, 255, 255)
             speech_triggered = False
             hands_detected = 0
-            next_state = "listening"
+            next_state = "thinking"
             
             # Lógica de estados según actividad TTS
             if tts.is_synthesizing():
@@ -660,13 +722,30 @@ def main() -> None:
                 status_text = "Hablando..."
                 status_color = (0, 255, 100)
                 next_state = "speaking"
+            elif result.hand_landmarks and len(result.hand_landmarks) > 1:
+                # Múltiples manos detectadas: mostrar mensaje amigable
+                status_text = "¡Muchas personas! De uno en uno, por favor 😊"
+                status_color = (100, 200, 255)
+                next_state = "thinking"
+                hand_presence_start = None  # Resetear timer
+                thumbs_up_detector.reset()
             elif result.hand_landmarks and result.handedness:
+                # Mano detectada: inicia timer si no estaba activo
+                if hand_presence_start is None:
+                    hand_presence_start = time.time()
+                
+                # Cambiar a listening solo si la mano estuvo presente el tiempo suficiente
+                time_with_hand = time.time() - hand_presence_start
+                if time_with_hand >= hand_presence_threshold:
+                    next_state = "listening"
+                
                 hands_detected = len(result.hand_landmarks)
                 for hand_index in range(hands_detected):
                     hand_landmarks = result.hand_landmarks[hand_index]
                     handedness_label = result.handedness[hand_index][0].category_name
                     wrist_x = hand_center_x(hand_landmarks)
                     palm_open = is_open_palm(hand_landmarks, handedness_label)
+                    thumbs_up = is_thumbs_up(hand_landmarks, handedness_label)
 
                     if show_camera_preview:
                         for landmark in hand_landmarks:
@@ -674,22 +753,34 @@ def main() -> None:
                             y = int(landmark.y * frame.shape[0])
                             cv2.circle(frame, (x, y), 4, (0, 255, 0), -1)
 
-                    # Use the detector for this hand
-                    hand_speech = detectors[hand_index].update(wrist_x, palm_open)
-                    if hand_speech:
-                        speech_triggered = True
-                    
-                    # Update status based on first hand for display
-                    if hand_index == 0:
+                    # Detectar thumbs up
+                    if thumbs_up_detector.update(thumbs_up):
+                        status_text = "¡Tío guay! 🤙"
+                        status_color = (0, 255, 0)
+                        next_state = "capturing"
+                        tts.say("Jajaja, ¡qué guay! Tú sí que tienes estilo, parcero")
+                    elif thumbs_up:
+                        # El gesto sigue presente: mantener la cara de capturing, pero sin repetir voz
+                        status_text = "¡Tío guay! 🤙"
+                        status_color = (0, 255, 0)
+                        next_state = "capturing"
+                    # Use the detector for this hand (gesto saludo)
+                    else:
+                        hand_speech = detectors[hand_index].update(wrist_x, palm_open)
                         if hand_speech:
-                            status_text = "Saludo"
-                            status_color = (0, 255, 0)
-                        elif palm_open:
-                            status_text = "Mano detectada, mueve la mano para saludar"
-                            status_color = (0, 200, 255)
-                        else:
-                            status_text = "Mano detectada"
-                            status_color = (255, 200, 0)
+                            speech_triggered = True
+                        
+                        # Update status based on first hand for display
+                        if hand_index == 0:
+                            if hand_speech:
+                                status_text = "Saludo"
+                                status_color = (0, 255, 0)
+                            elif palm_open:
+                                status_text = "Mano detectada, mueve la mano para saludar"
+                                status_color = (0, 200, 255)
+                            else:
+                                status_text = "Mano detectada"
+                                status_color = (255, 200, 0)
                 
                 # Reset detectors for hands that are no longer detected
                 for hand_index in range(hands_detected, len(detectors)):
@@ -698,6 +789,9 @@ def main() -> None:
                 if speech_triggered:
                     tts.say("Hola, Bienvenido al family day de Dia")
             else:
+                # Sin mano detectada: resetear timer y cooldown
+                hand_presence_start = None
+                thumbs_up_detector.reset()
                 for detector in detectors:
                     detector.reset()
 
@@ -708,29 +802,25 @@ def main() -> None:
 
             speaking = tts.is_speaking()
 
-            draw_label(frame, "Presiona q para salir", 30, (255, 255, 255))
-            draw_label(frame, status_text, 70, status_color)
-
             character_img = character.next_frame(current_state, speaking=speaking)
             if character_img is not None:
                 character_resized = resize_with_aspect_ratio(character_img, 1280, 720, (201, 227, 193))
                 canvas = character_resized.copy()
-                if show_camera_preview:
-                    frame_resized = cv2.resize(frame, (320, 240))
-                    cam_x = canvas.shape[1] - frame_resized.shape[1] - 10
-                    cam_y = canvas.shape[0] - frame_resized.shape[0] - 10
-                    canvas[cam_y:cam_y + frame_resized.shape[0], cam_x:cam_x + frame_resized.shape[1]] = frame_resized
             else:
                 placeholder = np.zeros((720, 1280, 3), dtype=np.uint8)
                 placeholder[:] = [201, 227, 193]
                 cv2.putText(placeholder, "Coloca PNGs en", (500, 350), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
                 cv2.putText(placeholder, "faces/" + current_state, (550, 400), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
                 canvas = placeholder.copy()
-                if show_camera_preview:
-                    frame_resized = cv2.resize(frame, (320, 240))
-                    cam_x = canvas.shape[1] - frame_resized.shape[1] - 10
-                    cam_y = canvas.shape[0] - frame_resized.shape[0] - 10
-                    canvas[cam_y:cam_y + frame_resized.shape[0], cam_x:cam_x + frame_resized.shape[1]] = frame_resized
+
+            if show_camera_preview:
+                frame_resized = cv2.resize(frame, (320, 240))
+                cam_x = canvas.shape[1] - frame_resized.shape[1] - 10
+                cam_y = canvas.shape[0] - frame_resized.shape[0] - 10
+                canvas[cam_y:cam_y + frame_resized.shape[0], cam_x:cam_x + frame_resized.shape[1]] = frame_resized
+
+            draw_label(canvas, "Presiona q para salir", 30, (255, 255, 255))
+            draw_label(canvas, status_text, 70, status_color)
 
             cv2.imshow(window_name, canvas)
             key = cv2.waitKey(1) & 0xFF

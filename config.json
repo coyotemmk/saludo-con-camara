@@ -5,5 +5,6 @@
   "system_voice_name": "",
   "system_voice_rate": 150,
   "system_voice_volume": 0.9,
-  "system_language_hint": "es"
+  "system_language_hint": "es",
+  "show_camera_preview": true
 }
