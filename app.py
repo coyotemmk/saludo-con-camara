@@ -23,8 +23,8 @@ import platform
 
 CONFIG_FILE = Path("config.json")
 
-CAPTURE_WIDTH = 640
-CAPTURE_HEIGHT = 480
+CAPTURE_WIDTH = 1280
+CAPTURE_HEIGHT = 720
 DETECTION_WIDTH = 320
 DETECTION_HEIGHT = 240
 
@@ -37,6 +37,10 @@ DEFAULT_CONFIG = {
     "system_voice_rate": 150,
     "system_voice_volume": 0.9,
     "system_language_hint": "es",
+    "proximity_pose_area_threshold": 0.25,
+    "proximity_cooldown_seconds": 5.0,
+    "gesture_wrist_shoulder_margin": 0.03,
+    "gesture_elbow_shoulder_margin": 0.03,
 }
 
 
@@ -80,7 +84,11 @@ class PoseGestureDetector:
         self.is_active = False
 
 
-def is_arm_raised(pose_landmarks) -> bool:
+def is_arm_raised(
+    pose_landmarks,
+    wrist_shoulder_margin: float = 0.03,
+    elbow_shoulder_margin: float = 0.03,
+) -> bool:
     """Detecta si uno de los brazos está levantado por encima del hombro."""
     left_shoulder = pose_landmarks[11]
     right_shoulder = pose_landmarks[12]
@@ -89,24 +97,30 @@ def is_arm_raised(pose_landmarks) -> bool:
     left_wrist = pose_landmarks[15]
     right_wrist = pose_landmarks[16]
 
-    left_arm_up = left_wrist.y < left_shoulder.y - 0.08 and left_elbow.y < left_shoulder.y
-    right_arm_up = right_wrist.y < right_shoulder.y - 0.08 and right_elbow.y < right_shoulder.y
+    left_arm_up = left_wrist.y < left_shoulder.y - wrist_shoulder_margin and left_elbow.y < left_shoulder.y + elbow_shoulder_margin
+    right_arm_up = right_wrist.y < right_shoulder.y - wrist_shoulder_margin and right_elbow.y < right_shoulder.y + elbow_shoulder_margin
 
     return left_arm_up or right_arm_up
 
 
-def is_face_too_close(face_landmarks) -> bool:
-    """Detecta si la cara está demasiado cerca (ocupa >60% del frame)."""
-    if not face_landmarks:
+def is_pose_too_close(pose_landmarks, pose_area_threshold: float = 0.25) -> bool:
+    """Detecta si estás muy cerca usando solo el área del pose (cuerpo).
+    
+    Mide el bbox de los landmarks del pose y lo compara contra un umbral.
+    Si el área del cuerpo > pose_area_threshold, significa que está muy cerca.
+    """
+    if not pose_landmarks:
         return False
-    xs = [lm.x for lm in face_landmarks]
-    ys = [lm.y for lm in face_landmarks]
-    x_min, x_max = min(xs), max(xs)
-    y_min, y_max = min(ys), max(ys)
-    face_width = x_max - x_min
-    face_height = y_max - y_min
-    face_area = face_width * face_height
-    return face_area > 0.6
+    
+    pxs = [lm.x for lm in pose_landmarks]
+    pys = [lm.y for lm in pose_landmarks]
+    p_xmin, p_xmax = min(pxs), max(pxs)
+    p_ymin, p_ymax = min(pys), max(pys)
+    pose_width = p_xmax - p_xmin
+    pose_height = p_ymax - p_ymin
+    pose_area = pose_width * pose_height
+    
+    return pose_area > pose_area_threshold
 
 
 POSE_CONNECTIONS = (
@@ -135,16 +149,10 @@ def _normalized_to_pixel(landmark, frame_width: int, frame_height: int) -> tuple
     return x, y
 
 
-def draw_tracking_overlay(frame: np.ndarray, face_result, pose_result) -> np.ndarray:
+def draw_tracking_overlay(frame: np.ndarray, pose_result) -> np.ndarray:
     """Dibuja puntos y líneas de seguimiento sobre el frame de cámara."""
     annotated_frame = frame.copy()
     frame_height, frame_width = annotated_frame.shape[:2]
-
-    if face_result.face_landmarks:
-        for face_landmarks in face_result.face_landmarks:
-            for landmark in face_landmarks:
-                x, y = _normalized_to_pixel(landmark, frame_width, frame_height)
-                cv2.circle(annotated_frame, (x, y), 1, (0, 255, 0), -1)
 
     if pose_result.pose_landmarks:
         for pose_landmarks in pose_result.pose_landmarks:
@@ -191,14 +199,6 @@ def ensure_task_model_file(model_filename: str, model_url: str, description: str
     print(f"Descargando el modelo de {description} por primera vez...")
     urllib.request.urlretrieve(model_url, model_path)
     return model_path
-
-
-def ensure_face_model_file() -> Path:
-    return ensure_task_model_file(
-        "face_landmarker.task",
-        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-        "caras",
-    )
 
 
 def ensure_pose_model_file() -> Path:
@@ -644,19 +644,10 @@ class CharacterFaceLoader:
 def main() -> None:
     config = load_config()
     tts = TTSWorker(config)
-    face_model_path = ensure_face_model_file()
     pose_model_path = ensure_pose_model_file()
     character = CharacterFaceLoader()
     show_camera_preview = bool(config.get("show_camera_preview", config.get("show_camara_preview", False)))
 
-    face_options = vision.FaceLandmarkerOptions(
-        base_options=python.BaseOptions(model_asset_path=str(face_model_path)),
-        running_mode=vision.RunningMode.IMAGE,
-        num_faces=3,
-        min_face_detection_confidence=0.5,
-        min_face_presence_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
     pose_options = vision.PoseLandmarkerOptions(
         base_options=python.BaseOptions(model_asset_path=str(pose_model_path)),
         running_mode=vision.RunningMode.IMAGE,
@@ -686,14 +677,17 @@ def main() -> None:
     multi_person_announced = False
     # Persona muy cerca: aviso de proximidad
     last_too_close_time = 0.0
-    too_close_cooldown = 5.0
+    too_close_cooldown = float(config.get("proximity_cooldown_seconds", 5.0))
+    proximity_pose_area_threshold = float(config.get("proximity_pose_area_threshold", 0.25))
+    gesture_wrist_shoulder_margin = float(config.get("gesture_wrist_shoulder_margin", 0.03))
+    gesture_elbow_shoulder_margin = float(config.get("gesture_elbow_shoulder_margin", 0.03))
 
     # Create and configure fullscreen window
     window_name = "Saludo con camara"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-    with vision.FaceLandmarker.create_from_options(face_options) as face_detector, vision.PoseLandmarker.create_from_options(pose_options) as pose_landmarker:
+    with vision.PoseLandmarker.create_from_options(pose_options) as pose_landmarker:
         while True:
             success, frame = camera.read()
             if not success or frame is None:
@@ -706,9 +700,8 @@ def main() -> None:
             detection_frame = cv2.resize(frame, (DETECTION_WIDTH, DETECTION_HEIGHT))
             rgb_frame = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-            face_result = face_detector.detect(mp_image)
-            face_count = len(face_result.face_landmarks) if face_result.face_landmarks is not None else 0
             pose_result = pose_landmarker.detect(mp_image)
+            pose_count = len(pose_result.pose_landmarks) if pose_result.pose_landmarks is not None else 0
 
             status_text = "Busca tu rostro en la camara"
             status_color = (255, 255, 255)
@@ -725,7 +718,7 @@ def main() -> None:
                 status_text = "Hablando..."
                 status_color = (0, 255, 100)
                 next_state = "speaking"
-            elif face_count == 0:
+            elif pose_count == 0:
                 status_text = "No veo a nadie"
                 status_color = (255, 200, 0)
                 next_state = "thinking"
@@ -734,7 +727,7 @@ def main() -> None:
                 multi_person_start_time = None
                 multi_person_announced = False
                 last_too_close_time = 0.0
-            elif face_count > 1:
+            elif pose_count > 1:
                 # Múltiples personas detectadas: mostrar capturing 1s, luego hablar
                 status_text = "Solo una persona, por favor"
                 status_color = (100, 200, 255)
@@ -756,7 +749,13 @@ def main() -> None:
             else:
                 # Una sola persona: activar listening tras una pequeña estabilidad
                 if face_presence_start is None:
-                    face_presence_start = time.time()
+                    # Si venimos de múltiples personas, permitir entrada inmediata a listening
+                    if multi_person_start_time is not None:
+                        # Ya detectamos múltiples antes, así que permitir entrada directa
+                        face_presence_start = now - face_presence_threshold
+                    else:
+                        # Primera vez que vemos una persona
+                        face_presence_start = time.time()
 
                 time_with_face = time.time() - face_presence_start
                 if time_with_face >= face_presence_threshold:
@@ -764,34 +763,46 @@ def main() -> None:
 
                     # (No reproducir saludo automático aquí — el saludo se hará solo con el gesto)
 
-                # Detectar si la persona está muy cerca
-                if face_result.face_landmarks and len(face_result.face_landmarks) > 0:
-                    first_face = face_result.face_landmarks[0]
-                    if is_face_too_close(first_face):
-                        if (now - last_too_close_time) >= too_close_cooldown:
-                            if not tts.is_synthesizing() and not tts.is_speaking():
-                                tts.say("Yepa, alejate un poco, estás muy cerca")
-                                last_too_close_time = now
-
-                if pose_result.pose_landmarks:
+                # Resetear múltiples personas cuando solo hay una
+                multi_person_start_time = None
+                multi_person_announced = False
+                
+                pose_is_visible = pose_result.pose_landmarks and len(pose_result.pose_landmarks) > 0
+                
+                # Detectar gesto de saludo PRIMERO
+                arm_raised = False
+                gesture_triggered = False
+                if pose_is_visible:
                     pose_landmarks = pose_result.pose_landmarks[0]
-                    arm_raised = is_arm_raised(pose_landmarks)
-
+                    arm_raised = is_arm_raised(
+                        pose_landmarks,
+                        gesture_wrist_shoulder_margin,
+                        gesture_elbow_shoulder_margin,
+                    )
                     if pose_gesture_detector.update(arm_raised):
                         status_text = "¡Hola! 👋"
                         status_color = (0, 255, 0)
                         next_state = "listening"
                         tts.say("Hola, Bienvenido al family day de Dia")
+                        gesture_triggered = True
                     elif arm_raised:
                         status_text = "¡Hola! 👋"
                         status_color = (0, 255, 0)
                         next_state = "listening"
+                
+                # Advertencia de proximidad (solo usa pose)
+                if pose_is_visible:
+                    pose_lms = pose_result.pose_landmarks[0]
+                    if is_pose_too_close(pose_lms, proximity_pose_area_threshold):
+                        status_text = "Estás muy cerca"
+                        status_color = (0, 120, 255)
+                        if (now - last_too_close_time) >= too_close_cooldown:
+                            if not tts.is_synthesizing() and not tts.is_speaking():
+                                tts.say("Yepa, alejate un poco, estás muy cerca")
+                                last_too_close_time = now
                     else:
                         status_text = "Te veo"
                         status_color = (0, 200, 255)
-                else:
-                    status_text = "Acércate un poco"
-                    status_color = (0, 200, 255)
 
                 # Resetear el detector si la persona se va o hay inestabilidad prolongada
                 if time_with_face < face_presence_threshold:
@@ -818,8 +829,7 @@ def main() -> None:
             if show_camera_preview:
                 frame_resized = cv2.resize(frame, (320, 240))
                 preview_pose_result = pose_result
-                preview_face_result = face_result
-                frame_resized = draw_tracking_overlay(frame_resized, preview_face_result, preview_pose_result)
+                frame_resized = draw_tracking_overlay(frame_resized, preview_pose_result)
                 cam_x = canvas.shape[1] - frame_resized.shape[1] - 10
                 cam_y = canvas.shape[0] - frame_resized.shape[0] - 10
                 canvas[cam_y:cam_y + frame_resized.shape[0], cam_x:cam_x + frame_resized.shape[1]] = frame_resized

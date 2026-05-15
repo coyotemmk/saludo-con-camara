@@ -6,5 +6,9 @@
   "system_voice_rate": 150,
   "system_voice_volume": 0.9,
   "system_language_hint": "es",
-  "show_camera_preview": false
+  "show_camera_preview": true,
+  "proximity_pose_area_threshold": 0.70,
+  "proximity_cooldown_seconds": 5.0,
+  "gesture_wrist_shoulder_margin": 0.03,
+  "gesture_elbow_shoulder_margin": 0.03
 }
