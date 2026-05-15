@@ -95,6 +95,20 @@ def is_arm_raised(pose_landmarks) -> bool:
     return left_arm_up or right_arm_up
 
 
+def is_face_too_close(face_landmarks) -> bool:
+    """Detecta si la cara está demasiado cerca (ocupa >60% del frame)."""
+    if not face_landmarks:
+        return False
+    xs = [lm.x for lm in face_landmarks]
+    ys = [lm.y for lm in face_landmarks]
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+    face_width = x_max - x_min
+    face_height = y_max - y_min
+    face_area = face_width * face_height
+    return face_area > 0.6
+
+
 POSE_CONNECTIONS = (
     (11, 12),
     (11, 13),
@@ -667,6 +681,12 @@ def main() -> None:
     # Saludo por detección de cara (cooldown para no repetir)
     last_face_greet_time = 0.0
     face_greet_cooldown = 10.0
+    # Múltiples personas: mostrar capturing 1s antes de hablar
+    multi_person_start_time = None
+    multi_person_announced = False
+    # Persona muy cerca: aviso de proximidad
+    last_too_close_time = 0.0
+    too_close_cooldown = 5.0
 
     # Create and configure fullscreen window
     window_name = "Saludo con camara"
@@ -711,13 +731,28 @@ def main() -> None:
                 next_state = "thinking"
                 face_presence_start = None
                 pose_gesture_detector.reset()
+                multi_person_start_time = None
+                multi_person_announced = False
+                last_too_close_time = 0.0
             elif face_count > 1:
-                # Múltiples personas detectadas: mostrar mensaje amigable
+                # Múltiples personas detectadas: mostrar capturing 1s, luego hablar
                 status_text = "Solo una persona, por favor"
                 status_color = (100, 200, 255)
-                next_state = "thinking"
+                next_state = "capturing"
                 face_presence_start = None
                 pose_gesture_detector.reset()
+                last_too_close_time = 0.0
+
+                # Primera vez que detectamos múltiples personas
+                if multi_person_start_time is None:
+                    multi_person_start_time = now
+                    multi_person_announced = False
+
+                # Después de 1 segundo, reproducir el aviso
+                if not multi_person_announced and (now - multi_person_start_time) >= 1.0:
+                    if not tts.is_synthesizing() and not tts.is_speaking():
+                        tts.say("Hay muchas personas. Por favor, pónganse de uno en uno.")
+                        multi_person_announced = True
             else:
                 # Una sola persona: activar listening tras una pequeña estabilidad
                 if face_presence_start is None:
@@ -728,6 +763,15 @@ def main() -> None:
                     next_state = "listening"
 
                     # (No reproducir saludo automático aquí — el saludo se hará solo con el gesto)
+
+                # Detectar si la persona está muy cerca
+                if face_result.face_landmarks and len(face_result.face_landmarks) > 0:
+                    first_face = face_result.face_landmarks[0]
+                    if is_face_too_close(first_face):
+                        if (now - last_too_close_time) >= too_close_cooldown:
+                            if not tts.is_synthesizing() and not tts.is_speaking():
+                                tts.say("Yepa, alejate un poco, estás muy cerca")
+                                last_too_close_time = now
 
                 if pose_result.pose_landmarks:
                     pose_landmarks = pose_result.pose_landmarks[0]
