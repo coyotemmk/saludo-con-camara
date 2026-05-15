@@ -1,7 +1,4 @@
-from collections import deque
-import math
 import json
-import os
 from pathlib import Path
 import shutil
 import urllib.request
@@ -56,73 +53,16 @@ def load_config() -> dict:
     return config
 
 
-class GreetingDetector:
-    def __init__(self, history_size: int = 8, x_movement_threshold: float = 0.05) -> None:
-        self.hand_x_history = deque(maxlen=history_size)
-        self.x_movement_threshold = x_movement_threshold
-        self.last_trigger_time = 0.0
-        self.cooldown_seconds = 3.0
-        self.last_x = None
-        self.last_direction = 0
-        self.last_trigger_x = None
-
-    def update(self, wrist_x: float, palm_open: bool) -> bool:
-        if not palm_open:
-            self.reset()
-            return False
-
-        self.hand_x_history.append(wrist_x)
-
-        if self.last_x is None:
-            self.last_x = wrist_x
-            self.last_trigger_x = wrist_x
-            return False
-
-        delta = wrist_x - self.last_x
-        if abs(delta) < 0.004:
-            return False
-
-        current_direction = 1 if delta > 0 else -1
-        movement_from_last_trigger = abs(wrist_x - (self.last_trigger_x or wrist_x))
-
-        should_trigger = (
-            self.last_direction != 0
-            and current_direction != self.last_direction
-            and movement_from_last_trigger >= self.x_movement_threshold
-        )
-
-        self.last_x = wrist_x
-        self.last_direction = current_direction
-
-        now = time.time()
-        if not should_trigger or now - self.last_trigger_time < self.cooldown_seconds:
-            return False
-
-        self.last_trigger_time = now
-        self.last_x = None
-        self.last_direction = 0
-        self.last_trigger_x = None
-        self.hand_x_history.clear()
-        return True
-
-    def reset(self) -> None:
-        self.hand_x_history.clear()
-        self.last_x = None
-        self.last_direction = 0
-        self.last_trigger_x = None
-        self.last_trigger_time = 0.0
-
-
-class ThumbsUpDetector:
+class PoseGestureDetector:
     def __init__(self, cooldown_seconds: float = 3.0) -> None:
         self.cooldown_seconds = cooldown_seconds
         self.last_trigger_time = 0.0
         self.is_active = False
 
-    def update(self, thumbs_up: bool) -> bool:
+    def update(self, gesture_active: bool) -> bool:
         now = time.time()
 
-        if not thumbs_up:
+        if not gesture_active:
             self.is_active = False
             return False
 
@@ -140,54 +80,72 @@ class ThumbsUpDetector:
         self.is_active = False
 
 
-def is_open_palm(landmarks, handedness_label: str) -> bool:
-    fingers = [
-        (8, 6),
-        (12, 10),
-        (16, 14),
-        (20, 18),
-    ]
+def is_arm_raised(pose_landmarks) -> bool:
+    """Detecta si uno de los brazos está levantado por encima del hombro."""
+    left_shoulder = pose_landmarks[11]
+    right_shoulder = pose_landmarks[12]
+    left_elbow = pose_landmarks[13]
+    right_elbow = pose_landmarks[14]
+    left_wrist = pose_landmarks[15]
+    right_wrist = pose_landmarks[16]
 
-    extended = 0
-    for tip_index, pip_index in fingers:
-        if landmarks[tip_index].y < landmarks[pip_index].y:
-            extended += 1
+    left_arm_up = left_wrist.y < left_shoulder.y - 0.08 and left_elbow.y < left_shoulder.y
+    right_arm_up = right_wrist.y < right_shoulder.y - 0.08 and right_elbow.y < right_shoulder.y
 
-    thumb_tip = landmarks[4]
-    thumb_ip = landmarks[3]
-    if handedness_label == "Right":
-        thumb_extended = thumb_tip.x > thumb_ip.x
-    else:
-        thumb_extended = thumb_tip.x < thumb_ip.x
-
-    if thumb_extended:
-        extended += 1
-
-    return extended >= 4
+    return left_arm_up or right_arm_up
 
 
-def is_thumbs_up(landmarks, handedness_label: str) -> bool:
-    """Detecta si la mano está mostrando el gesto thumbs up (pulgar arriba)."""
-    wrist = landmarks[0]
-    thumb_tip = landmarks[4]
-    thumb_ip = landmarks[3]
-    
-    # El pulgar debe estar más arriba que la muñeca (Y menor)
-    thumb_above_wrist = thumb_tip.y < wrist.y - 0.1
-    
-    # El pulgar debe estar extendido (comparar con la articulación intermedia)
-    thumb_extended = abs(thumb_tip.y - thumb_ip.y) > 0.05
-    
-    # Los otros dedos deben estar cerrados/doblados
-    fingers = [(8, 6), (12, 10), (16, 14), (20, 18)]
-    closed_fingers = 0
-    for tip_index, pip_index in fingers:
-        if landmarks[tip_index].y >= landmarks[pip_index].y:  # dedo cerrado/doblado
-            closed_fingers += 1
-    
-    fingers_closed = closed_fingers >= 3  # al menos 3 dedos cerrados
-    
-    return thumb_above_wrist and thumb_extended and fingers_closed
+POSE_CONNECTIONS = (
+    (11, 12),
+    (11, 13),
+    (13, 15),
+    (12, 14),
+    (14, 16),
+    (11, 23),
+    (12, 24),
+    (23, 24),
+    (23, 25),
+    (25, 27),
+    (24, 26),
+    (26, 28),
+    (27, 29),
+    (29, 31),
+    (28, 30),
+    (30, 32),
+)
+
+
+def _normalized_to_pixel(landmark, frame_width: int, frame_height: int) -> tuple[int, int]:
+    x = int(max(0.0, min(1.0, float(landmark.x))) * frame_width)
+    y = int(max(0.0, min(1.0, float(landmark.y))) * frame_height)
+    return x, y
+
+
+def draw_tracking_overlay(frame: np.ndarray, face_result, pose_result) -> np.ndarray:
+    """Dibuja puntos y líneas de seguimiento sobre el frame de cámara."""
+    annotated_frame = frame.copy()
+    frame_height, frame_width = annotated_frame.shape[:2]
+
+    if face_result.face_landmarks:
+        for face_landmarks in face_result.face_landmarks:
+            for landmark in face_landmarks:
+                x, y = _normalized_to_pixel(landmark, frame_width, frame_height)
+                cv2.circle(annotated_frame, (x, y), 1, (0, 255, 0), -1)
+
+    if pose_result.pose_landmarks:
+        for pose_landmarks in pose_result.pose_landmarks:
+            for start_idx, end_idx in POSE_CONNECTIONS:
+                start_landmark = pose_landmarks[start_idx]
+                end_landmark = pose_landmarks[end_idx]
+                start_point = _normalized_to_pixel(start_landmark, frame_width, frame_height)
+                end_point = _normalized_to_pixel(end_landmark, frame_width, frame_height)
+                cv2.line(annotated_frame, start_point, end_point, (255, 180, 0), 2)
+
+            for landmark in pose_landmarks:
+                x, y = _normalized_to_pixel(landmark, frame_width, frame_height)
+                cv2.circle(annotated_frame, (x, y), 3, (0, 120, 255), -1)
+
+    return annotated_frame
 
 
 def hand_center_x(landmarks) -> float:
@@ -210,19 +168,31 @@ def resize_with_aspect_ratio(image, target_width: int, target_height: int, backg
     return canvas
 
 
-def ensure_model_file() -> Path:
-    model_path = Path("models") / "hand_landmarker.task"
+def ensure_task_model_file(model_filename: str, model_url: str, description: str) -> Path:
+    model_path = Path("models") / model_filename
     if model_path.exists():
         return model_path
 
     model_path.parent.mkdir(parents=True, exist_ok=True)
-    model_url = (
-        "https://storage.googleapis.com/mediapipe-models/"
-        "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
-    )
-    print("Descargando el modelo de manos por primera vez...")
+    print(f"Descargando el modelo de {description} por primera vez...")
     urllib.request.urlretrieve(model_url, model_path)
     return model_path
+
+
+def ensure_face_model_file() -> Path:
+    return ensure_task_model_file(
+        "face_landmarker.task",
+        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+        "caras",
+    )
+
+
+def ensure_pose_model_file() -> Path:
+    return ensure_task_model_file(
+        "pose_landmarker_lite.task",
+        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+        "pose",
+    )
 
 
 def find_piper_voice_model(config: dict) -> tuple[Optional[Path], Optional[Path]]:
@@ -581,7 +551,8 @@ class CharacterFaceLoader:
             "speaking": "speaking",
             "thinking": "thinking",
             "error": "error",
-            "capturing": "capturing",
+            # "capturing" expression removed; map to listening to avoid using that folder
+            "capturing": "listening",
         }
 
         if self.faces_dir.exists():
@@ -658,20 +629,26 @@ class CharacterFaceLoader:
 
 def main() -> None:
     config = load_config()
-    detectors = [GreetingDetector()]
-    thumbs_up_detector = ThumbsUpDetector(cooldown_seconds=3.0)
     tts = TTSWorker(config)
-    model_path = ensure_model_file()
+    face_model_path = ensure_face_model_file()
+    pose_model_path = ensure_pose_model_file()
     character = CharacterFaceLoader()
     show_camera_preview = bool(config.get("show_camera_preview", config.get("show_camara_preview", False)))
 
-    base_options = python.BaseOptions(model_asset_path=str(model_path))
-    options = vision.HandLandmarkerOptions(
-        base_options=base_options,
+    face_options = vision.FaceLandmarkerOptions(
+        base_options=python.BaseOptions(model_asset_path=str(face_model_path)),
         running_mode=vision.RunningMode.IMAGE,
-        num_hands=1,
-        min_hand_detection_confidence=0.5,
-        min_hand_presence_confidence=0.5,
+        num_faces=3,
+        min_face_detection_confidence=0.5,
+        min_face_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+    pose_options = vision.PoseLandmarkerOptions(
+        base_options=python.BaseOptions(model_asset_path=str(pose_model_path)),
+        running_mode=vision.RunningMode.IMAGE,
+        num_poses=1,
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
         min_tracking_confidence=0.5,
     )
 
@@ -684,116 +661,97 @@ def main() -> None:
     camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     current_state = "listening"
-    hand_presence_start = None  # timestamp cuando se detectó mano por primera vez
-    hand_presence_threshold = 0.5  # segundos antes de cambiar a listening
+    face_presence_start = None  # timestamp cuando se detecta una sola persona por primera vez
+    face_presence_threshold = 0.5  # segundos antes de cambiar a listening
+    pose_gesture_detector = PoseGestureDetector(cooldown_seconds=3.0)
+    # Saludo por detección de cara (cooldown para no repetir)
+    last_face_greet_time = 0.0
+    face_greet_cooldown = 10.0
 
     # Create and configure fullscreen window
     window_name = "Saludo con camara"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-    with vision.HandLandmarker.create_from_options(options) as hands:
+    with vision.FaceLandmarker.create_from_options(face_options) as face_detector, vision.PoseLandmarker.create_from_options(pose_options) as pose_landmarker:
         while True:
             success, frame = camera.read()
             if not success or frame is None:
                 print("No se pudo leer la camara.")
                 break
 
+            now = time.time()
+
             frame = cv2.flip(frame, 1)
             detection_frame = cv2.resize(frame, (DETECTION_WIDTH, DETECTION_HEIGHT))
             rgb_frame = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-            result = hands.detect(mp_image)
+            face_result = face_detector.detect(mp_image)
+            face_count = len(face_result.face_landmarks) if face_result.face_landmarks is not None else 0
+            pose_result = pose_landmarker.detect(mp_image)
 
-            status_text = "Busca tu mano en la camara"
+            status_text = "Busca tu rostro en la camara"
             status_color = (255, 255, 255)
-            speech_triggered = False
-            hands_detected = 0
             next_state = "thinking"
             
             # Lógica de estados según actividad TTS
             if tts.is_synthesizing():
-                # Fase de síntesis: mostrar "Procesando voz..." y estado capturing
+                # Fase de síntesis: mostrar "Procesando voz..." (usar estado listening en lugar de capturing)
                 status_text = "Procesando voz..."
                 status_color = (0, 200, 255)
-                next_state = "capturing"
+                next_state = "listening"
             elif tts.is_speaking():
                 # Fase de reproducción: mostrar estado speaking (con animación de boca)
                 status_text = "Hablando..."
                 status_color = (0, 255, 100)
                 next_state = "speaking"
-            elif result.hand_landmarks and len(result.hand_landmarks) > 1:
-                # Múltiples manos detectadas: mostrar mensaje amigable
-                status_text = "¡Muchas personas! De uno en uno, por favor 😊"
+            elif face_count == 0:
+                status_text = "No veo a nadie"
+                status_color = (255, 200, 0)
+                next_state = "thinking"
+                face_presence_start = None
+                pose_gesture_detector.reset()
+            elif face_count > 1:
+                # Múltiples personas detectadas: mostrar mensaje amigable
+                status_text = "Solo una persona, por favor"
                 status_color = (100, 200, 255)
                 next_state = "thinking"
-                hand_presence_start = None  # Resetear timer
-                thumbs_up_detector.reset()
-            elif result.hand_landmarks and result.handedness:
-                # Mano detectada: inicia timer si no estaba activo
-                if hand_presence_start is None:
-                    hand_presence_start = time.time()
-                
-                # Cambiar a listening solo si la mano estuvo presente el tiempo suficiente
-                time_with_hand = time.time() - hand_presence_start
-                if time_with_hand >= hand_presence_threshold:
-                    next_state = "listening"
-                
-                hands_detected = len(result.hand_landmarks)
-                for hand_index in range(hands_detected):
-                    hand_landmarks = result.hand_landmarks[hand_index]
-                    handedness_label = result.handedness[hand_index][0].category_name
-                    wrist_x = hand_center_x(hand_landmarks)
-                    palm_open = is_open_palm(hand_landmarks, handedness_label)
-                    thumbs_up = is_thumbs_up(hand_landmarks, handedness_label)
-
-                    if show_camera_preview:
-                        for landmark in hand_landmarks:
-                            x = int(landmark.x * frame.shape[1])
-                            y = int(landmark.y * frame.shape[0])
-                            cv2.circle(frame, (x, y), 4, (0, 255, 0), -1)
-
-                    # Detectar thumbs up
-                    if thumbs_up_detector.update(thumbs_up):
-                        status_text = "¡Tío guay! 🤙"
-                        status_color = (0, 255, 0)
-                        next_state = "capturing"
-                        tts.say("Jajaja, ¡qué guay! Tú sí que tienes estilo, parcero")
-                    elif thumbs_up:
-                        # El gesto sigue presente: mantener la cara de capturing, pero sin repetir voz
-                        status_text = "¡Tío guay! 🤙"
-                        status_color = (0, 255, 0)
-                        next_state = "capturing"
-                    # Use the detector for this hand (gesto saludo)
-                    else:
-                        hand_speech = detectors[hand_index].update(wrist_x, palm_open)
-                        if hand_speech:
-                            speech_triggered = True
-                        
-                        # Update status based on first hand for display
-                        if hand_index == 0:
-                            if hand_speech:
-                                status_text = "Saludo"
-                                status_color = (0, 255, 0)
-                            elif palm_open:
-                                status_text = "Mano detectada, mueve la mano para saludar"
-                                status_color = (0, 200, 255)
-                            else:
-                                status_text = "Mano detectada"
-                                status_color = (255, 200, 0)
-                
-                # Reset detectors for hands that are no longer detected
-                for hand_index in range(hands_detected, len(detectors)):
-                    detectors[hand_index].reset()
-                
-                if speech_triggered:
-                    tts.say("Hola, Bienvenido al family day de Dia")
+                face_presence_start = None
+                pose_gesture_detector.reset()
             else:
-                # Sin mano detectada: resetear timer y cooldown
-                hand_presence_start = None
-                thumbs_up_detector.reset()
-                for detector in detectors:
-                    detector.reset()
+                # Una sola persona: activar listening tras una pequeña estabilidad
+                if face_presence_start is None:
+                    face_presence_start = time.time()
+
+                time_with_face = time.time() - face_presence_start
+                if time_with_face >= face_presence_threshold:
+                    next_state = "listening"
+
+                    # (No reproducir saludo automático aquí — el saludo se hará solo con el gesto)
+
+                if pose_result.pose_landmarks:
+                    pose_landmarks = pose_result.pose_landmarks[0]
+                    arm_raised = is_arm_raised(pose_landmarks)
+
+                    if pose_gesture_detector.update(arm_raised):
+                        status_text = "¡Hola! 👋"
+                        status_color = (0, 255, 0)
+                        next_state = "listening"
+                        tts.say("Hola, Bienvenido al family day de Dia")
+                    elif arm_raised:
+                        status_text = "¡Hola! 👋"
+                        status_color = (0, 255, 0)
+                        next_state = "listening"
+                    else:
+                        status_text = "Te veo"
+                        status_color = (0, 200, 255)
+                else:
+                    status_text = "Acércate un poco"
+                    status_color = (0, 200, 255)
+
+                # Resetear el detector si la persona se va o hay inestabilidad prolongada
+                if time_with_face < face_presence_threshold:
+                    next_state = "thinking"
 
             # Actualizar estado según actividad
             if next_state != current_state:
@@ -815,6 +773,9 @@ def main() -> None:
 
             if show_camera_preview:
                 frame_resized = cv2.resize(frame, (320, 240))
+                preview_pose_result = pose_result
+                preview_face_result = face_result
+                frame_resized = draw_tracking_overlay(frame_resized, preview_face_result, preview_pose_result)
                 cam_x = canvas.shape[1] - frame_resized.shape[1] - 10
                 cam_y = canvas.shape[0] - frame_resized.shape[0] - 10
                 canvas[cam_y:cam_y + frame_resized.shape[0], cam_x:cam_x + frame_resized.shape[1]] = frame_resized
