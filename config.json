@@ -11,4 +11,7 @@
   "proximity_cooldown_seconds": 5.0,
   "gesture_wrist_shoulder_margin": 0.03,
   "gesture_elbow_shoulder_margin": 0.03
+  ,"max_people_allowed": 2,
+  "many_people_cooldown": 10.0,
+  "many_people_message": "Wow, cuánta gente"
 }

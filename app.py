@@ -14,6 +14,7 @@ import hashlib
 import cv2
 import numpy as np
 import mediapipe as mp
+from collections import deque
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from piper import PiperVoice, SynthesisConfig
@@ -25,8 +26,9 @@ CONFIG_FILE = Path("config.json")
 
 CAPTURE_WIDTH = 1280
 CAPTURE_HEIGHT = 720
-DETECTION_WIDTH = 320
-DETECTION_HEIGHT = 240
+# Usar la máxima resolución de captura también para la detección por defecto
+DETECTION_WIDTH = CAPTURE_WIDTH
+DETECTION_HEIGHT = CAPTURE_HEIGHT
 
 DEFAULT_CONFIG = {
     "tts_backend": "auto",
@@ -41,6 +43,12 @@ DEFAULT_CONFIG = {
     "proximity_cooldown_seconds": 5.0,
     "gesture_wrist_shoulder_margin": 0.03,
     "gesture_elbow_shoulder_margin": 0.03,
+    "gesture_up_delta": 0.06,
+    "gesture_oscillation_x": 0.04,
+    "gesture_window_seconds": 0.8,
+    "max_people_allowed": 2,
+    "many_people_cooldown": 10.0,
+    "many_people_message": "Wow, cuánta gente"
 }
 
 
@@ -58,30 +66,74 @@ def load_config() -> dict:
 
 
 class PoseGestureDetector:
-    def __init__(self, cooldown_seconds: float = 3.0) -> None:
+    def __init__(
+        self,
+        cooldown_seconds: float = 3.0,
+        window_seconds: float = 0.8,
+        up_delta: float = 0.06,
+        oscillation_x: float = 0.04,
+    ) -> None:
         self.cooldown_seconds = cooldown_seconds
         self.last_trigger_time = 0.0
         self.is_active = False
 
-    def update(self, gesture_active: bool) -> bool:
-        now = time.time()
-
-        if not gesture_active:
-            self.is_active = False
-            return False
-
-        if self.is_active:
-            return False
-
-        if now - self.last_trigger_time < self.cooldown_seconds:
-            return False
-
-        self.is_active = True
-        self.last_trigger_time = now
-        return True
+        # Motion-history based detection
+        self.window_seconds = window_seconds
+        self.up_delta = up_delta
+        self.oscillation_x = oscillation_x
+        self.left_wrist_hist: deque = deque()
+        self.right_wrist_hist: deque = deque()
 
     def reset(self) -> None:
         self.is_active = False
+        self.left_wrist_hist.clear()
+        self.right_wrist_hist.clear()
+
+    def _trim_history(self, hist: deque, now: float) -> None:
+        cutoff = now - self.window_seconds
+        while hist and hist[0][0] < cutoff:
+            hist.popleft()
+
+    def update_with_landmarks(self, pose_landmarks) -> bool:
+        """Detecta un gesto tipo 'saludo' basándose en movimiento de muñeca.
+
+        Reglas simples:
+        - Se requiere una subida rápida (delta Y) en la ventana.
+        - Se requiere oscilación lateral (delta X) dentro de la ventana.
+        """
+        now = time.time()
+        if not pose_landmarks:
+            return False
+
+        lw = pose_landmarks[15]
+        rw = pose_landmarks[16]
+        # Append (time, x, y)
+        self.left_wrist_hist.append((now, float(lw.x), float(lw.y)))
+        self.right_wrist_hist.append((now, float(rw.x), float(rw.y)))
+
+        self._trim_history(self.left_wrist_hist, now)
+        self._trim_history(self.right_wrist_hist, now)
+
+        def detect_in_hist(hist: deque) -> bool:
+            if len(hist) < 3:
+                return False
+            ys = [t_y for (_, _, t_y) in hist]
+            xs = [t_x for (_, t_x, _) in hist]
+            # upward motion: earlier y - recent y > up_delta (y smaller = up)
+            if ys[0] - ys[-1] < self.up_delta:
+                return False
+            # lateral oscillation: range of x > oscillation_x
+            if max(xs) - min(xs) < self.oscillation_x:
+                return False
+            return True
+
+        left_ok = detect_in_hist(self.left_wrist_hist)
+        right_ok = detect_in_hist(self.right_wrist_hist)
+
+        if (left_ok or right_ok) and (now - self.last_trigger_time >= self.cooldown_seconds):
+            self.last_trigger_time = now
+            return True
+        return False
 
 
 def is_arm_raised(
@@ -651,7 +703,7 @@ def main() -> None:
     pose_options = vision.PoseLandmarkerOptions(
         base_options=python.BaseOptions(model_asset_path=str(pose_model_path)),
         running_mode=vision.RunningMode.IMAGE,
-        num_poses=1,
+        num_poses=4,
         min_pose_detection_confidence=0.5,
         min_pose_presence_confidence=0.5,
         min_tracking_confidence=0.5,
@@ -681,6 +733,10 @@ def main() -> None:
     proximity_pose_area_threshold = float(config.get("proximity_pose_area_threshold", 0.25))
     gesture_wrist_shoulder_margin = float(config.get("gesture_wrist_shoulder_margin", 0.03))
     gesture_elbow_shoulder_margin = float(config.get("gesture_elbow_shoulder_margin", 0.03))
+    max_people_allowed = int(config.get("max_people_allowed", 2))
+    many_people_cooldown = float(config.get("many_people_cooldown", 10.0))
+    many_people_message = str(config.get("many_people_message", "Wow, cuánta gente"))
+    last_many_time = 0.0
 
     # Create and configure fullscreen window
     window_name = "Saludo con camara"
@@ -727,24 +783,40 @@ def main() -> None:
                 multi_person_start_time = None
                 multi_person_announced = False
                 last_too_close_time = 0.0
-            elif pose_count > 1:
-                # Múltiples personas detectadas: mostrar capturing 1s, luego hablar
-                status_text = "Solo una persona, por favor"
+            elif pose_count > max_people_allowed:
+                # Demasiadas personas: mensaje especial
+                status_text = many_people_message
                 status_color = (100, 200, 255)
                 next_state = "capturing"
                 face_presence_start = None
                 pose_gesture_detector.reset()
                 last_too_close_time = 0.0
 
-                # Primera vez que detectamos múltiples personas
+                # Primera vez que detectamos multitud
                 if multi_person_start_time is None:
                     multi_person_start_time = now
                     multi_person_announced = False
 
-                # Después de 1 segundo, reproducir el aviso
+                # Después de 1 segundo, reproducir el aviso (con cooldown propio)
+                if not multi_person_announced and (now - multi_person_start_time) >= 1.0:
+                    if (now - last_many_time) >= many_people_cooldown:
+                        if not tts.is_synthesizing() and not tts.is_speaking():
+                            tts.say(many_people_message)
+                            last_many_time = now
+                            multi_person_announced = True
+            elif pose_count > 1:
+                # Hay varias personas (pero dentro del umbral permitido)
+                status_text = f"Veo {pose_count} personas"
+                status_color = (100, 200, 255)
+                next_state = "capturing"
+                # marcar inicio para posible anuncio breve
+                if multi_person_start_time is None:
+                    multi_person_start_time = now
+                    multi_person_announced = False
+
                 if not multi_person_announced and (now - multi_person_start_time) >= 1.0:
                     if not tts.is_synthesizing() and not tts.is_speaking():
-                        tts.say("Hay muchas personas. Por favor, pónganse de uno en uno.")
+                        tts.say(f"Veo {pose_count} personas")
                         multi_person_announced = True
             else:
                 # Una sola persona: activar listening tras una pequeña estabilidad
@@ -774,18 +846,21 @@ def main() -> None:
                 gesture_triggered = False
                 if pose_is_visible:
                     pose_landmarks = pose_result.pose_landmarks[0]
+                    # Gesture detection: prefer motion-based detection
                     arm_raised = is_arm_raised(
                         pose_landmarks,
                         gesture_wrist_shoulder_margin,
                         gesture_elbow_shoulder_margin,
                     )
-                    if pose_gesture_detector.update(arm_raised):
+                    gesture_detected = pose_gesture_detector.update_with_landmarks(pose_landmarks)
+                    if gesture_detected:
                         status_text = "¡Hola! 👋"
                         status_color = (0, 255, 0)
                         next_state = "listening"
                         tts.say("Hola, Bienvenido al family day de Dia")
                         gesture_triggered = True
-                    elif arm_raised:
+                    elif arm_raised and not gesture_detected:
+                        # Fallback to static raise if motion not observed
                         status_text = "¡Hola! 👋"
                         status_color = (0, 255, 0)
                         next_state = "listening"
