@@ -83,11 +83,13 @@ class PoseGestureDetector:
         self.oscillation_x = oscillation_x
         self.left_wrist_hist: deque = deque()
         self.right_wrist_hist: deque = deque()
+        self.hand_hist: deque = deque()
 
     def reset(self) -> None:
         self.is_active = False
         self.left_wrist_hist.clear()
         self.right_wrist_hist.clear()
+        self.hand_hist.clear()
 
     def _trim_history(self, hist: deque, now: float) -> None:
         cutoff = now - self.window_seconds
@@ -134,6 +136,37 @@ class PoseGestureDetector:
             self.last_trigger_time = now
             return True
         return False
+
+    def update_with_hand(self, hand_landmarks, shoulder_y: float) -> bool:
+        """Detecta un saludo con la mano tipo onda.
+
+        Requiere la muñeca por encima del hombro y movimiento lateral
+        suficiente dentro de la ventana temporal.
+        """
+        now = time.time()
+        if not hand_landmarks:
+            return False
+
+        wrist_y = float(hand_landmarks[0].y)
+        if wrist_y >= shoulder_y:
+            return False
+
+        center_x = hand_center_x(hand_landmarks)
+        self.hand_hist.append((now, center_x, wrist_y))
+        self._trim_history(self.hand_hist, now)
+
+        if len(self.hand_hist) < 3:
+            return False
+
+        xs = [x for (_, x, _) in self.hand_hist]
+        if max(xs) - min(xs) < self.oscillation_x:
+            return False
+
+        if now - self.last_trigger_time < self.cooldown_seconds:
+            return False
+
+        self.last_trigger_time = now
+        return True
 
 
 def is_arm_raised(
@@ -194,6 +227,15 @@ POSE_CONNECTIONS = (
     (30, 32),
 )
 
+HAND_CONNECTIONS = (
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    (0, 9), (9, 10), (10, 11), (11, 12),
+    (0, 13), (13, 14), (14, 15), (15, 16),
+    (0, 17), (17, 18), (18, 19), (19, 20),
+    (5, 9), (9, 13), (13, 17)
+)
+
 
 def _normalized_to_pixel(landmark, frame_width: int, frame_height: int) -> tuple[int, int]:
     x = int(max(0.0, min(1.0, float(landmark.x))) * frame_width)
@@ -201,7 +243,7 @@ def _normalized_to_pixel(landmark, frame_width: int, frame_height: int) -> tuple
     return x, y
 
 
-def draw_tracking_overlay(frame: np.ndarray, pose_result) -> np.ndarray:
+def draw_tracking_overlay(frame: np.ndarray, pose_result, hand_result=None) -> np.ndarray:
     """Dibuja puntos y líneas de seguimiento sobre el frame de cámara."""
     annotated_frame = frame.copy()
     frame_height, frame_width = annotated_frame.shape[:2]
@@ -219,12 +261,35 @@ def draw_tracking_overlay(frame: np.ndarray, pose_result) -> np.ndarray:
                 x, y = _normalized_to_pixel(landmark, frame_width, frame_height)
                 cv2.circle(annotated_frame, (x, y), 3, (0, 120, 255), -1)
 
+    # Dibujar manos (si se proporcionó resultado de manos)
+    if hand_result and getattr(hand_result, 'hand_landmarks', None):
+        for hand_landmarks in hand_result.hand_landmarks:
+            # Conexiones
+            for start_idx, end_idx in HAND_CONNECTIONS:
+                start_landmark = hand_landmarks[start_idx]
+                end_landmark = hand_landmarks[end_idx]
+                start_point = _normalized_to_pixel(start_landmark, frame_width, frame_height)
+                end_point = _normalized_to_pixel(end_landmark, frame_width, frame_height)
+                cv2.line(annotated_frame, start_point, end_point, (0, 220, 0), 2)
+
+            # Puntos de referencia
+            for landmark in hand_landmarks:
+                x, y = _normalized_to_pixel(landmark, frame_width, frame_height)
+                cv2.circle(annotated_frame, (x, y), 3, (0, 180, 0), -1)
+
     return annotated_frame
 
 
 def hand_center_x(landmarks) -> float:
     anchor_points = (0, 5, 9, 13, 17)
     return sum(landmarks[index].x for index in anchor_points) / len(anchor_points)
+
+
+def get_highest_hand_landmarks(hand_result):
+    """Devuelve la mano más alta (menor y de muñeca) o None."""
+    if not hand_result or not hand_result.hand_landmarks:
+        return None
+    return min(hand_result.hand_landmarks, key=lambda lms: float(lms[0].y))
 
 
 def resize_with_aspect_ratio(image, target_width: int, target_height: int, background_color: tuple[int, int, int]) -> np.ndarray:
@@ -258,6 +323,14 @@ def ensure_pose_model_file() -> Path:
         "pose_landmarker_lite.task",
         "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
         "pose",
+    )
+
+
+def ensure_hand_model_file() -> Path:
+    return ensure_task_model_file(
+        "hand_landmarker.task",
+        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+        "manos",
     )
 
 
@@ -697,6 +770,7 @@ def main() -> None:
     config = load_config()
     tts = TTSWorker(config)
     pose_model_path = ensure_pose_model_file()
+    hand_model_path = ensure_hand_model_file()
     character = CharacterFaceLoader()
     show_camera_preview = bool(config.get("show_camera_preview", config.get("show_camara_preview", False)))
 
@@ -706,6 +780,14 @@ def main() -> None:
         num_poses=4,
         min_pose_detection_confidence=0.5,
         min_pose_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+    hand_options = vision.HandLandmarkerOptions(
+        base_options=python.BaseOptions(model_asset_path=str(hand_model_path)),
+        running_mode=vision.RunningMode.IMAGE,
+        num_hands=2,
+        min_hand_detection_confidence=0.5,
+        min_hand_presence_confidence=0.5,
         min_tracking_confidence=0.5,
     )
 
@@ -720,7 +802,16 @@ def main() -> None:
     current_state = "listening"
     face_presence_start = None  # timestamp cuando se detecta una sola persona por primera vez
     face_presence_threshold = 0.5  # segundos antes de cambiar a listening
-    pose_gesture_detector = PoseGestureDetector(cooldown_seconds=3.0)
+    gesture_up_delta = float(config.get("gesture_up_delta", 0.12))
+    gesture_oscillation_x = float(config.get("gesture_oscillation_x", 0.08))
+    gesture_window_seconds = float(config.get("gesture_window_seconds", 1.2))
+    gesture_detection_delay_seconds = float(config.get("gesture_detection_delay_seconds", 2.0))
+    pose_gesture_detector = PoseGestureDetector(
+        cooldown_seconds=3.0,
+        window_seconds=gesture_window_seconds,
+        up_delta=gesture_up_delta,
+        oscillation_x=gesture_oscillation_x,
+    )
     # Saludo por detección de cara (cooldown para no repetir)
     last_face_greet_time = 0.0
     face_greet_cooldown = 10.0
@@ -743,7 +834,7 @@ def main() -> None:
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-    with vision.PoseLandmarker.create_from_options(pose_options) as pose_landmarker:
+    with vision.PoseLandmarker.create_from_options(pose_options) as pose_landmarker, vision.HandLandmarker.create_from_options(hand_options) as hand_landmarker:
         while True:
             success, frame = camera.read()
             if not success or frame is None:
@@ -757,6 +848,7 @@ def main() -> None:
             rgb_frame = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
             pose_result = pose_landmarker.detect(mp_image)
+            hand_result = hand_landmarker.detect(mp_image)
             pose_count = len(pose_result.pose_landmarks) if pose_result.pose_landmarks is not None else 0
 
             status_text = "Busca tu rostro en la camara"
@@ -826,8 +918,9 @@ def main() -> None:
                         # Ya detectamos múltiples antes, así que permitir entrada directa
                         face_presence_start = now - face_presence_threshold
                     else:
-                        # Primera vez que vemos una persona
+                        # Primera vez que vemos una persona: resetear detector y guardar timestamp
                         face_presence_start = time.time()
+                        pose_gesture_detector.reset()  # Limpiar historial de movimiento
 
                 time_with_face = time.time() - face_presence_start
                 if time_with_face >= face_presence_threshold:
@@ -841,29 +934,23 @@ def main() -> None:
                 
                 pose_is_visible = pose_result.pose_landmarks and len(pose_result.pose_landmarks) > 0
                 
-                # Detectar gesto de saludo PRIMERO
+                # Detectar gesto de saludo PRIMERO (pero solo si han pasado suficientes segundos)
                 arm_raised = False
                 gesture_triggered = False
-                if pose_is_visible:
+                time_since_appearance = now - face_presence_start if face_presence_start else float('inf')
+                
+                if pose_is_visible and time_since_appearance >= gesture_detection_delay_seconds:
                     pose_landmarks = pose_result.pose_landmarks[0]
-                    # Gesture detection: prefer motion-based detection
-                    arm_raised = is_arm_raised(
-                        pose_landmarks,
-                        gesture_wrist_shoulder_margin,
-                        gesture_elbow_shoulder_margin,
-                    )
-                    gesture_detected = pose_gesture_detector.update_with_landmarks(pose_landmarks)
+                    # Gesture detection: only hand-based (onda de mano deliberada)
+                    highest_hand = get_highest_hand_landmarks(hand_result)
+                    shoulder_y = min(float(pose_landmarks[11].y), float(pose_landmarks[12].y))
+                    gesture_detected = pose_gesture_detector.update_with_hand(highest_hand, shoulder_y)
                     if gesture_detected:
                         status_text = "¡Hola! 👋"
                         status_color = (0, 255, 0)
                         next_state = "listening"
                         tts.say("Hola, Bienvenido al family day de Dia")
                         gesture_triggered = True
-                    elif arm_raised and not gesture_detected:
-                        # Fallback to static raise if motion not observed
-                        status_text = "¡Hola! 👋"
-                        status_color = (0, 255, 0)
-                        next_state = "listening"
                 
                 # Advertencia de proximidad (solo usa pose)
                 if pose_is_visible:
@@ -904,7 +991,7 @@ def main() -> None:
             if show_camera_preview:
                 frame_resized = cv2.resize(frame, (320, 240))
                 preview_pose_result = pose_result
-                frame_resized = draw_tracking_overlay(frame_resized, preview_pose_result)
+                frame_resized = draw_tracking_overlay(frame_resized, preview_pose_result, hand_result)
                 cam_x = canvas.shape[1] - frame_resized.shape[1] - 10
                 cam_y = canvas.shape[0] - frame_resized.shape[0] - 10
                 canvas[cam_y:cam_y + frame_resized.shape[0], cam_x:cam_x + frame_resized.shape[1]] = frame_resized

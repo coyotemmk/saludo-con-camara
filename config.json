@@ -10,8 +10,12 @@
   "proximity_pose_area_threshold": 0.70,
   "proximity_cooldown_seconds": 5.0,
   "gesture_wrist_shoulder_margin": 0.03,
-  "gesture_elbow_shoulder_margin": 0.03
-  ,"max_people_allowed": 2,
+  "gesture_elbow_shoulder_margin": 0.03,
+  "gesture_up_delta": 0.02,
+  "gesture_oscillation_x": 0.01,
+  "gesture_window_seconds": 0.5,
+  "gesture_detection_delay_seconds": 1.5,
+  "max_people_allowed": 2,
   "many_people_cooldown": 10.0,
   "many_people_message": "Wow, cuánta gente"
 }
