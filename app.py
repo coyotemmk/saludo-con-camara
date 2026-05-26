@@ -20,6 +20,7 @@ from mediapipe.tasks.python import vision
 from piper import PiperVoice, SynthesisConfig
 import pyttsx3
 import platform
+import random
 
 
 CONFIG_FILE = Path("config.json")
@@ -34,6 +35,14 @@ DEFAULT_CONFIG = {
     "tts_backend": "auto",
     "piper_voice_model": "voice/bmo.onnx",
     "piper_voice_config": "voice/bmo.onnx.json",
+    "piper_length_scale": 1.15,
+    "tts_phrases": [
+        "Hola, Bienvenido al family day de Dia",
+        "Jajaja, ¡qué guay! Tú sí que tienes estilo, parcero"
+    ],
+    "speech_rate": 1.0,
+    "proximity_phrase": "Yepa, aléjate un poco, estás muy cerca",
+    "see_people_phrase": "Veo {count} personas",
     "show_camera_preview": False,
     "system_voice_name": "",
     "system_voice_rate": 150,
@@ -63,6 +72,16 @@ def load_config() -> dict:
         except Exception as exc:
             print(f"Config: no se pudo leer {CONFIG_FILE}: {exc}")
     return config
+
+
+def get_phrase(config: dict, key: str, default: Optional[str] = None) -> Optional[str]:
+    """Return a phrase from config[key]. If it's a list, pick randomly. If absent, return default."""
+    val = config.get(key)
+    if val is None:
+        return default
+    if isinstance(val, (list, tuple)) and val:
+        return random.choice(val)
+    return str(val)
 
 
 class PoseGestureDetector:
@@ -382,6 +401,16 @@ class TTSWorker:
         self.piper_voice = None
         self.config = config
         self.tts_backend = str(config.get("tts_backend", "auto")).lower()
+        # Global speech rate multiplier: >1 faster, <1 slower (aplica a motor sistema y Piper)
+        self.speech_rate = float(config.get("speech_rate", 1.0))
+        # Base Piper length scale from config, then scale inversely by speech_rate
+        base_piper_length = float(config.get("piper_length_scale", 1.15))
+        self.piper_length_scale = float(base_piper_length) * (1.0 / max(1e-6, self.speech_rate))
+        # Frases que se usarán para precachear/sintetizar por defecto
+        self.tts_phrases = list(config.get("tts_phrases", [
+            "Hola, Bienvenido al family day de Dia",
+            "Jajaja, ¡qué guay! Tú sí que tienes estilo, parcero",
+        ]))
         self.piper_model_path, self.piper_config_path = find_piper_voice_model(config)
         
         # Configurar caché de audio
@@ -415,7 +444,8 @@ class TTSWorker:
         """Initialize pyttsx3 engine with Spanish voice if available."""
         try:
             self.engine = pyttsx3.init()
-            self.engine.setProperty('rate', int(self.config.get("system_voice_rate", 150)))
+            base_rate = int(self.config.get("system_voice_rate", 150))
+            self.engine.setProperty('rate', int(base_rate * float(self.speech_rate)))
             self.engine.setProperty('volume', float(self.config.get("system_voice_volume", 0.9)))
             self._select_spanish_voice()
             print("TTSWorker: pyttsx3 inicializado")
@@ -537,7 +567,8 @@ class TTSWorker:
 
     def _get_cache_path(self, text: str) -> Path:
         """Generar ruta de caché basada en hash MD5 del texto."""
-        text_hash = hashlib.md5(text.encode()).hexdigest()
+        cache_key = f"{text}|length_scale={self.piper_length_scale:.3f}"
+        text_hash = hashlib.md5(cache_key.encode()).hexdigest()
         return self.cache_dir / f"{text_hash}.wav"
 
     def _get_or_synthesize_audio(self, text: str) -> bytes:
@@ -555,7 +586,7 @@ class TTSWorker:
         if not self.piper_voice:
             raise RuntimeError("Piper no está disponible en memoria")
 
-        syn_config = SynthesisConfig(length_scale=0.7)
+        syn_config = SynthesisConfig(length_scale=self.piper_length_scale)
         audio_parts = []
         for audio_chunk in self.piper_voice.synthesize(text, syn_config=syn_config):
             audio_parts.append(audio_chunk.audio_int16_bytes)
@@ -579,16 +610,61 @@ class TTSWorker:
         if not self.piper_voice:
             return
 
-        phrases = [
-            "Hola, Bienvenido al family day de Dia",
-            "Jajaja, ¡qué guay! Tú sí que tienes estilo, parcero",
-        ]
+        # Construir conjunto de frases a precachear: `tts_phrases` + variantes configuradas
+        phrases_set = set(self.tts_phrases or [])
+
+        # `greeting_phrase` puede ser string o lista
+        g = self.config.get("greeting_phrase")
+        if g:
+            if isinstance(g, (list, tuple)):
+                phrases_set.update(g)
+            else:
+                phrases_set.add(str(g))
+
+        # `proximity_phrase` puede ser string o lista
+        p = self.config.get("proximity_phrase")
+        if p:
+            if isinstance(p, (list, tuple)):
+                phrases_set.update(p)
+            else:
+                phrases_set.add(str(p))
+
+        # `see_people_phrase` es una plantilla con `{count}` — pre-generar ejemplos 1..max_people_allowed
+        see_tpl = self.config.get("see_people_phrase")
+        try:
+            max_count = int(self.config.get("max_people_allowed", 2))
+        except Exception:
+            max_count = 2
+        if see_tpl:
+            for c in range(1, max_count + 1):
+                try:
+                    phrases_set.add(str(see_tpl).format(count=c))
+                except Exception:
+                    phrases_set.add(str(see_tpl))
+
+        phrases = list(phrases_set)
 
         for phrase in phrases:
             try:
                 self._get_or_synthesize_audio(phrase)
             except Exception as exc:
                 print(f"TTSWorker: no se pudo precargar caché para '{phrase[:30]}...': {exc}")
+
+    def refresh_cache(self, clear_existing: bool = True) -> None:
+        """Clear the cache (optional) and re-run warm cache in background."""
+        try:
+            if clear_existing and self.cache_dir.exists():
+                for p in self.cache_dir.iterdir():
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+            # Start a new warm cache thread
+            t = threading.Thread(target=self._warm_cache, daemon=True)
+            t.start()
+            print("TTSWorker: refresh_cache iniciado")
+        except Exception as e:
+            print(f"TTSWorker: error refresh_cache -> {e}")
 
     def _speak_with_piper(self, text: str) -> None:
         """Synthesize and play audio using piper executable."""
@@ -908,7 +984,11 @@ def main() -> None:
 
                 if not multi_person_announced and (now - multi_person_start_time) >= 1.0:
                     if not tts.is_synthesizing() and not tts.is_speaking():
-                        tts.say(f"Veo {pose_count} personas")
+                        see_tpl = get_phrase(config, "see_people_phrase", "Veo {count} personas")
+                        try:
+                            tts.say(see_tpl.format(count=pose_count))
+                        except Exception:
+                            tts.say(str(see_tpl))
                         multi_person_announced = True
             else:
                 # Una sola persona: activar listening tras una pequeña estabilidad
@@ -949,7 +1029,9 @@ def main() -> None:
                         status_text = "¡Hola! 👋"
                         status_color = (0, 255, 0)
                         next_state = "listening"
-                        tts.say("Hola, Bienvenido al family day de Dia")
+                        # Elegir saludo aleatorio: `greeting_phrase` o `tts_phrases`
+                        greet = get_phrase(config, "greeting_phrase") or get_phrase(config, "tts_phrases", "Hola, Bienvenido al family day de Dia")
+                        tts.say(greet)
                         gesture_triggered = True
                 
                 # Advertencia de proximidad (solo usa pose)
@@ -960,7 +1042,8 @@ def main() -> None:
                         status_color = (0, 120, 255)
                         if (now - last_too_close_time) >= too_close_cooldown:
                             if not tts.is_synthesizing() and not tts.is_speaking():
-                                tts.say("Yepa, alejate un poco, estás muy cerca")
+                                prox = get_phrase(config, "proximity_phrase", "Yepa, aléjate un poco, estás muy cerca")
+                                tts.say(prox)
                                 last_too_close_time = now
                     else:
                         status_text = "Te veo"
@@ -1003,6 +1086,12 @@ def main() -> None:
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
+            if key == ord("r"):
+                # Forzar recache de frases TTS
+                try:
+                    tts.refresh_cache(clear_existing=True)
+                except Exception as e:
+                    print(f"Error: no se pudo iniciar recache -> {e}")
 
     camera.release()
     cv2.destroyAllWindows()

@@ -2,6 +2,15 @@
   "tts_backend": "piper",
   "piper_voice_model": "voice/es_ES-davefx-medium.onnx",
   "piper_voice_config": "voice/es_ES-davefx-medium.onnx.json",
+  "piper_length_scale": 1.15,
+  "speech_rate": 1.0,
+  "tts_phrases": [
+    "Hola, Bienvenido al family day de Dia",
+    "Hello, ¡qué guay! Tú sí que tienes estilo, amiguete", "¡Ey, qué pasa! Me encanta tu estilo, ¡bienvenido al family day de Dia!", "¡Hola, hola! ¡Qué bien que hayas venido al family day de Dia!"
+  ],
+  "proximity_phrase": ["¡Hola! Me estás muy cerca, te puedes hacer un pelín para atrás, porfa?", "¡Ey! Estás muy cerca, ¿me puedes dar un poco de espacio?", "¡Oye! Estás demasiado cerca, ¿podrías darme un poco de espacio, por favor?", "WOW ¡Qué cerca estás! ¿Podrías hacerte para atrás?"],
+  "see_people_phrase": ["Veo {count} personas", "¡Wow, veo a {count} personas! ¡Qué bien, me encanta la gente!", "¡Vaya, veo a {count} personas! ¡Esto es genial!"],
+  "many_people_message": ["Wow, cuánta gente a venido a este fantastico evento, ¡me encanta!", "¡Increíble! ¡Qué bien, me encanta la gente!", "¡Vaya, cuánta gente! ¡Esto es genial!"],
   "system_voice_name": "",
   "system_voice_rate": 150,
   "system_voice_volume": 0.9,
@@ -16,6 +25,5 @@
   "gesture_window_seconds": 0.5,
   "gesture_detection_delay_seconds": 1.5,
   "max_people_allowed": 2,
-  "many_people_cooldown": 10.0,
-  "many_people_message": "Wow, cuánta gente"
+  "many_people_cooldown": 3.0
 }

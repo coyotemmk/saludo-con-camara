@@ -224,11 +224,24 @@ chmod +x /usr/local/bin/piper
    ```json
    {
      "tts_backend": "piper",
-     "piper_voice_model": "voice/bmo.onnx"
+       "piper_voice_model": "voice/bmo.onnx",
+       "piper_length_scale": 1.15,
+       ,"tts_phrases": [
+          "Hola, Bienvenido al family day de Dia",
+          "Jajaja, ¡qué guay! Tú sí que tienes estilo, parcero"
+       ],
+       "proximity_phrase": "Yepa, aléjate un poco, estás muy cerca",
+       "see_people_phrase": "Veo {count} personas"
+    }
+          "Hola, Bienvenido al family day de Dia",
+          "Jajaja, ¡qué guay! Tú sí que tienes estilo, parcero"
+       ]
    }
    ```
 3. Ejecuta la app: `./start.sh` o `python app.py`
 4. Al iniciar verás: `TTSWorker: voz Piper cargada desde voice/bmo.onnx`
+
+`piper_length_scale` controla la velocidad de la voz. Valores más altos hacen que hable más lento; valores más bajos la aceleran.
 
 ### Si Piper no funciona
 
