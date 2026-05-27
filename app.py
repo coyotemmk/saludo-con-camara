@@ -311,7 +311,7 @@ def get_highest_hand_landmarks(hand_result):
     return min(hand_result.hand_landmarks, key=lambda lms: float(lms[0].y))
 
 
-def resize_with_aspect_ratio(image, target_width: int, target_height: int, background_color: tuple[int, int, int]) -> np.ndarray:
+def resize_with_aspect_ratio(image, target_width: int, target_height: int, background_color: tuple[int, int, int]) -> tuple[np.ndarray, int, int, int, int]:
     source_height, source_width = image.shape[:2]
     scale = min(target_width / source_width, target_height / source_height)
 
@@ -323,7 +323,7 @@ def resize_with_aspect_ratio(image, target_width: int, target_height: int, backg
     offset_x = (target_width - resized_width) // 2
     offset_y = (target_height - resized_height) // 2
     canvas[offset_y:offset_y + resized_height, offset_x:offset_x + resized_width] = resized_image
-    return canvas
+    return canvas, offset_x, offset_y, resized_width, resized_height
 
 
 def ensure_task_model_file(model_filename: str, model_url: str, description: str) -> Path:
@@ -1038,7 +1038,7 @@ def main() -> None:
                 if pose_is_visible:
                     pose_lms = pose_result.pose_landmarks[0]
                     if is_pose_too_close(pose_lms, proximity_pose_area_threshold):
-                        status_text = "Estás muy cerca"
+                        status_text = "Estas muy cerca"
                         status_color = (0, 120, 255)
                         if (now - last_too_close_time) >= too_close_cooldown:
                             if not tts.is_synthesizing() and not tts.is_speaking():
@@ -1062,14 +1062,26 @@ def main() -> None:
 
             character_img = character.next_frame(current_state, speaking=speaking)
             if character_img is not None:
-                character_resized = resize_with_aspect_ratio(character_img, 1280, 720, (201, 227, 193))
+                character_resized, offset_x, offset_y, resized_width, resized_height = resize_with_aspect_ratio(character_img, 1280, 720, (0, 0, 0))
                 canvas = character_resized.copy()
             else:
                 placeholder = np.zeros((720, 1280, 3), dtype=np.uint8)
-                placeholder[:] = [201, 227, 193]
-                cv2.putText(placeholder, "Coloca PNGs en", (500, 350), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
-                cv2.putText(placeholder, "faces/" + current_state, (550, 400), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2)
+                placeholder[:] = [0, 0, 0]
+                cv2.putText(placeholder, "Coloca PNGs en", (500, 350), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+                cv2.putText(placeholder, "faces/" + current_state, (550, 400), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
                 canvas = placeholder.copy()
+                offset_x = 0
+                offset_y = 0
+                resized_width = canvas.shape[1]
+                resized_height = canvas.shape[0]
+
+            # Si hay margen superior negro por el ajuste, usarlo para el estado arriba.
+            # Si no hay margen superior, dibujar el texto sin crear una barra extra.
+            if offset_y > 0:
+                status_text_y = max(30, min(48, offset_y // 2 + 18))
+            else:
+                status_text_y = 48
+            cv2.putText(canvas, status_text, (20, status_text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, status_color, 2, cv2.LINE_AA)
 
             if show_camera_preview:
                 frame_resized = cv2.resize(frame, (320, 240))
@@ -1078,9 +1090,6 @@ def main() -> None:
                 cam_x = canvas.shape[1] - frame_resized.shape[1] - 10
                 cam_y = canvas.shape[0] - frame_resized.shape[0] - 10
                 canvas[cam_y:cam_y + frame_resized.shape[0], cam_x:cam_x + frame_resized.shape[1]] = frame_resized
-
-            draw_label(canvas, "Presiona q para salir", 30, (255, 255, 255))
-            draw_label(canvas, status_text, 70, status_color)
 
             cv2.imshow(window_name, canvas)
             key = cv2.waitKey(1) & 0xFF
