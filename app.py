@@ -745,6 +745,20 @@ def draw_label(frame, text: str, y: int, color: tuple[int, int, int]) -> None:
     cv2.putText(frame, text, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
 
 
+def draw_text_with_outline(
+    frame: np.ndarray,
+    text: str,
+    position: tuple[int, int],
+    text_color: tuple[int, int, int],
+    outline_color: tuple[int, int, int] = (0, 0, 0),
+    scale: float = 1.0,
+    thickness: int = 2,
+) -> None:
+    """Dibuja texto legible con contorno para que destaque sobre fondos verdes."""
+    cv2.putText(frame, text, position, cv2.FONT_HERSHEY_SIMPLEX, scale, outline_color, thickness + 3, cv2.LINE_AA)
+    cv2.putText(frame, text, position, cv2.FONT_HERSHEY_SIMPLEX, scale, text_color, thickness, cv2.LINE_AA)
+
+
 class CharacterFaceLoader:
     def __init__(self, faces_dir: str = "faces") -> None:
         self.faces_dir = Path(faces_dir)
@@ -1067,8 +1081,8 @@ def main() -> None:
             else:
                 placeholder = np.zeros((720, 1280, 3), dtype=np.uint8)
                 placeholder[:] = [0, 0, 0]
-                cv2.putText(placeholder, "Coloca PNGs en", (500, 350), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-                cv2.putText(placeholder, "faces/" + current_state, (550, 400), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+                draw_text_with_outline(placeholder, "Coloca PNGs en", (500, 350), (255, 255, 255), scale=1.0, thickness=2)
+                draw_text_with_outline(placeholder, "faces/" + current_state, (550, 400), (255, 255, 255), scale=1.0, thickness=2)
                 canvas = placeholder.copy()
                 offset_x = 0
                 offset_y = 0
@@ -1081,7 +1095,7 @@ def main() -> None:
                 status_text_y = max(30, min(48, offset_y // 2 + 18))
             else:
                 status_text_y = 48
-            cv2.putText(canvas, status_text, (20, status_text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, status_color, 2, cv2.LINE_AA)
+            draw_text_with_outline(canvas, status_text, (20, status_text_y), (255, 255, 255), scale=1.0, thickness=2)
 
             if show_camera_preview:
                 frame_resized = cv2.resize(frame, (320, 240))
